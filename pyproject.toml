@@ -1,0 +1,14 @@
+[project]
+name = "chain-sniper"
+version = "0.1.0"
+description = "EVM blockchain listener and transaction monitor"
+requires-python = ">=3.10"
+dependencies = [
+    "aiohttp>=3.8.0",
+    "websockets>=11.0",
+    "web3>=7.0.0",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
