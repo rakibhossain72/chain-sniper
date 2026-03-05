@@ -178,6 +178,8 @@ class WebSocketListener:
         """Connect, subscribe, and run until :meth:`stop` is called."""
         self._running = True
         delay = self.reconnect_delay
+        # log
+        self.logger.info("Starting WebSocketListener")
 
         while self._running:
             try:
