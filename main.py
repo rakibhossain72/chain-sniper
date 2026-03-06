@@ -7,7 +7,8 @@ import dotenv
 
 from listener.websocket_listener import WebSocketListener, BlockDetail
 from engine.pipeline import Pipeline
-from abstracts.base_filter import BaseFilter
+from filters.dynamic_filter import DynamicFilter
+from listener.redis_rule_listener import RedisRuleListener
 from abstracts.base_strategy import BaseStrategy
 
 
@@ -18,14 +19,6 @@ RPC_URL = os.getenv("RPC_URL")
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
-class Filter(BaseFilter):
-    def match(self, tx):
-        return tx.get("to").lower() == "0x55d398326f99059fF775485246999027B3197955".lower()
-    
-    def match_log(self, log):
-        # check the amount > 100 USDT (with 18 decimals)
-        amount = int(log.get("data", "0x")[-64:], 16)
-        return amount > 5000 * (10 ** 18)
 
 
 class Strategy(BaseStrategy):
@@ -43,15 +36,29 @@ class Strategy(BaseStrategy):
 
 async def main():
 
-    pipeline = Pipeline(filter=Filter(), strategy=Strategy())
+    # 1. Initialize the dynamic filter
+    dyn_filter = DynamicFilter()
+    
+    # 2. Add an initial rule (optional)
+    # dyn_filter.add_log_rule({"type": "log", "min_amount": 5000})
+
+    # 3. Initialize pipeline with dynamic filter
+    pipeline = Pipeline(filter=dyn_filter, strategy=Strategy())
 
     listener = WebSocketListener(RPC_URL, block_detail=BlockDetail.FULL_BLOCK)
+    
+    # 4. Initialize Background Rule Listener (Redis)
+    rule_listener = RedisRuleListener(dynamic_filter=dyn_filter)
+
+    # Start the rule listener in the background
+    await rule_listener.start()
 
 
+    listener.on("block", pipeline.process_block)
+    # listener.add_log_filter(address="0x55d398326f99059fF775485246999027B3197955", topics=["0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"])
+    # listener.on("log", pipeline.process_log)
 
-    # listener.on("block", pipeline.process_block)
-    listener.add_log_filter(address="0x55d398326f99059fF775485246999027B3197955", topics=["0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"])
-    listener.on("log", pipeline.process_log)
+    # listener.on("log", pipeline.process_log)
 
     await listener.start()
 
