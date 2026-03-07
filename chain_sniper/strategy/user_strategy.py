@@ -1,4 +1,4 @@
-from abstracts.base_strategy import BaseStrategy
+from chain_sniper.abstracts.base_strategy import BaseStrategy
 
 
 class UserStrategy(BaseStrategy):

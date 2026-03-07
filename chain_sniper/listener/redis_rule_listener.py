@@ -3,7 +3,7 @@ import json
 import logging
 from typing import Optional
 import redis.asyncio as redis
-from filters.dynamic_filter import DynamicFilter
+from chain_sniper.filters.dynamic_filter import DynamicFilter
 
 logger = logging.getLogger(__name__)
 

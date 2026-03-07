@@ -1,4 +1,4 @@
-from abstracts.base_filter import BaseFilter
+from chain_sniper.abstracts.base_filter import BaseFilter
 
 class ContractCallFilter(BaseFilter):
     def __init__(self, target_contract):

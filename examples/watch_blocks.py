@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from typing import Any
-from listener.websocket_listener import WebSocketListener
+from chain_sniper.listener.websocket_listener import WebSocketListener
 
 # ==============================
 # LOGGING SETUP

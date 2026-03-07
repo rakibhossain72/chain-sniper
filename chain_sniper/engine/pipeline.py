@@ -1,7 +1,7 @@
-from parser.block_parser import parse_block
-from parser.log_decoder import parse_log
-from abstracts.base_filter import BaseFilter
-from abstracts.base_strategy import BaseStrategy
+from chain_sniper.parser.block_parser import parse_block
+from chain_sniper.parser.log_decoder import parse_log
+from chain_sniper.abstracts.base_filter import BaseFilter
+from chain_sniper.abstracts.base_strategy import BaseStrategy
 
 
 class Pipeline:

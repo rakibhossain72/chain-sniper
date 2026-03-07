@@ -4,7 +4,7 @@ from typing import Any
 from web3 import AsyncWeb3
 from web3.providers.rpc import AsyncHTTPProvider
 from web3.middleware import ExtraDataToPOAMiddleware
-from listener.websocket_listener import WebSocketListener
+from chain_sniper.listener.websocket_listener import WebSocketListener
 
 # ==============================
 # LOGGING SETUP

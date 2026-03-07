@@ -5,11 +5,11 @@ import os
 
 import dotenv
 
-from listener.websocket_listener import WebSocketListener, BlockDetail
-from engine.pipeline import Pipeline
-from filters.dynamic_filter import DynamicFilter
-from listener.redis_rule_listener import RedisRuleListener
-from abstracts.base_strategy import BaseStrategy
+from chain_sniper.listener.websocket_listener import WebSocketListener, BlockDetail
+from chain_sniper.engine.pipeline import Pipeline
+from chain_sniper.filters.dynamic_filter import DynamicFilter
+from chain_sniper.listener.redis_rule_listener import RedisRuleListener
+from chain_sniper.abstracts.base_strategy import BaseStrategy
 
 
 dotenv.load_dotenv()

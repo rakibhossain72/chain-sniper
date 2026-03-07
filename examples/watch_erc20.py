@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from listener.websocket_listener import WebSocketListener, BlockDetail
+from chain_sniper.listener.websocket_listener import WebSocketListener, BlockDetail
 
 logging.basicConfig(
     level=logging.INFO,

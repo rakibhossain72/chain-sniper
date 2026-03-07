@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from typing import Any
-from listener.poll_listener import HttpListener, BlockDetail
+from chain_sniper.listener.poll_listener import HttpListener, BlockDetail
 
 # ==============================
 # LOGGING SETUP

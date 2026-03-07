@@ -1,7 +1,7 @@
 import logging
 from typing import Any, Dict, List
-from abstracts.base_filter import BaseFilter
-from parser.rule_parser import RuleMatcher
+from chain_sniper.abstracts.base_filter import BaseFilter
+from chain_sniper.parser.rule_parser import RuleMatcher
 
 class DynamicFilter(BaseFilter):
     """
