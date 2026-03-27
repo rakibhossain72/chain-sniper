@@ -65,6 +65,62 @@ pip install -r pyproject.toml
 - **WebSocketListener**: Best for real-time monitoring with low latency. Use when your RPC provider supports WebSocket subscriptions.
 - **HttpListener**: Use for RPC providers that only support HTTP, or when you need polling-based monitoring. Automatically falls back to `eth_getLogs` scanning if stateful filters aren't supported.
 
+## Modular Architecture
+
+Chain Sniper now includes reusable modules for common tasks:
+
+- **`chain_sniper.utils.config`**: Configuration management (env vars, RPC URLs)
+- **`chain_sniper.utils.logging`**: Consistent logging setup
+- **`chain_sniper.utils.abis`**: ABI loading and manipulation utilities
+- **`chain_sniper.contracts`**: Pre-registered contracts with ABIs and addresses
+- **`chain_sniper.utils.handlers`**: Reusable event handler factories
+- **`chain_sniper.utils.runner`**: Listener creation and execution utilities
+
+### Quick Examples
+
+#### Simple ERC20 Transfer Monitor (WebSocket)
+
+```python
+import asyncio
+from chain_sniper.utils import (
+    get_rpc_url, setup_logging, create_websocket_listener,
+    create_block_handler, create_log_handler, create_error_handler, run_listener
+)
+from chain_sniper.contracts import get_contract_abi, get_contract_address
+
+async def main():
+    # Setup
+    rpc_url = get_rpc_url()
+    logger = setup_logging()
+
+    # Create listener
+    listener = create_websocket_listener(rpc_url, logger=logger)
+
+    # Get contract details
+    usdt_address = get_contract_address("USDT_BSC")
+    erc20_abi = get_contract_abi("ERC20")
+
+    # Add ABI-based filter (auto-decodes logs!)
+    listener.add_abi_log_filter(abi=erc20_abi, address=usdt_address, event_name="Transfer")
+
+    # Register handlers
+    listener.on("block", create_block_handler())
+    listener.on("log", create_log_handler())
+    listener.on("error", create_error_handler())
+
+    # Run with proper error handling
+    await run_listener(listener)
+
+asyncio.run(main())
+```
+
+#### HTTP Polling Version
+
+```python
+# Same code, just change the listener type
+listener = create_http_listener(rpc_url, logger=logger, poll_interval=2.0)
+```
+
 ## Quick Start
 
 ### Watch New Blocks and Apply a Pipeline
@@ -81,7 +137,8 @@ Create a pipeline in `main.py`:
 import asyncio
 import os
 import dotenv
-from chain_sniper.listener.websocket_listener import WebSocketListener, BlockDetail
+from chain_sniper.listener.websocket_listener import WebSocketListener
+from chain_sniper.listener.common import BlockDetail
 from chain_sniper.engine.pipeline import Pipeline
 from chain_sniper.filters.dynamic_filter import DynamicFilter
 from chain_sniper.abstracts.base_strategy import BaseStrategy
@@ -120,8 +177,9 @@ uv run main.py
 
 Check out the `examples/` directory for more advanced usage:
 
+- **Modular Examples**: `simple_transfer_monitor.py` - Clean example using reusable modules
 - Basic Monitoring: `watch_blocks.py`, `watch_blocks_poll.py`
-- Advanced Filtering: `watch_erc20.py`, `watch_erc20_http.py`, `watch_native_wss.py`
+- Advanced Filtering: `watch_erc20.py`, `watch_erc20_http.py`
 - Dynamic Rules: `push_redis_rule.py`
 
 ## ABI-Based Event Filtering
@@ -131,28 +189,18 @@ Chain Sniper supports easy event filtering using contract ABIs instead of topic 
 ### Using ABI and Event Name (Recommended)
 
 ```python
-import json
 from chain_sniper.listener.websocket_listener import WebSocketListener
+from chain_sniper.listener.common import BlockDetail
 
-listener = WebSocketListener("wss://your-rpc-url")
+listener = WebSocketListener("wss://your-rpc-url", block_detail=BlockDetail.FULL_BLOCK)
+```
 
-# Load your contract ABI
-with open("path/to/abi.json", "r") as f:
-    abi = json.load(f)
+Or using the modular utilities:
 
-# Add filter by event name - no need for topic hashes!
-listener.add_abi_log_filter(
-    abi=abi,
-    address="0x...",  # contract address
-    event_name="Transfer"  # event name from ABI
-)
+```python
+from chain_sniper.utils import create_websocket_listener
 
-# Logs will be automatically decoded
-@listener.on("log")
-async def on_decoded_log(log):
-    if log.get("event") == "Transfer":
-        args = log["args"]
-        print(f"Transfer: {args['from']} -> {args['to']}: {args['value']}")
+listener = create_websocket_listener("wss://your-rpc-url", block_detail="full_block")
 ```
 
 ### Using Topic Hashes (Raw Logs)

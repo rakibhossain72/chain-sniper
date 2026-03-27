@@ -1,91 +1,58 @@
-import logging
 import asyncio
-import os
-import dotenv
-import json
 
-from chain_sniper.listener.poll_listener import HttpListener, BlockDetail
-
-dotenv.load_dotenv()
-RPC_URL = os.getenv("RPC_URL")
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+# Using the new modular utilities
+from chain_sniper.utils.config import get_rpc_url
+from chain_sniper.utils.logging import setup_logging
+from chain_sniper.utils.runner import create_http_listener, run_listener
+from chain_sniper.utils.handlers import (
+    create_block_handler,
+    create_log_handler,
+    create_error_handler,
 )
-logger = logging.getLogger("example")
-
-
-async def on_block(block: dict) -> None:
-    """Trigger when block comes
-
-    Args:
-        block (dict): full block data from on-chain
-    """
-    tx_count = len(block.get("transactions", []))
-    number = int(block["number"], 16)
-    print(f"[BLOCK] #{number:,}  hash={block['hash'][:12]}…  txs={tx_count}")
-
-
-async def on_log(log: dict) -> None:
-    print(log)
-    exit(0)
-    addr = log.get("address", "???")
-    # Check if log is decoded
-    if "event" in log:
-        # Decoded log
-        event_name = log.get("event")
-        args = log.get("args", {})
-        print(f"[LOG] {addr[:8]}… → {event_name}: {args}")
-    else:
-        # Raw log
-        topics = log.get("topics", [])
-        first_topic = topics[0][:10] + "…" if topics else "no-topic"
-        print(f"[LOG] {addr[:8]}… → {first_topic}")
-
-
-async def on_error(exc: Exception) -> None:
-    print(f"[ERROR] {type(exc).__name__}: {exc}")
+from chain_sniper.contracts import get_contract_abi, get_contract_address
 
 
 async def main() -> None:
-    # Use HttpListener for HTTP polling instead of WebSocket
-    listener = HttpListener(
-        RPC_URL,
-        block_detail=BlockDetail.FULL_BLOCK,  # or .HEADER (not txs)
+    # Load configuration and setup logging
+    rpc_url = get_rpc_url()
+    logger = setup_logging(level="INFO", logger_name="example")
+
+    # Create HTTP listener using utility function
+    listener = create_http_listener(
+        rpc_url=rpc_url,
+        block_detail="full_block",
         logger=logger,
-        poll_interval=2.0,  # Poll every 2 seconds
+        poll_interval=2.0,
     )
 
-    # ── USDT on BSC (mainnet) ───────────────────────────────────────
-    USDT = "0x55d398326f99059fF775485246999027B3197955"
+    # Get contract details from registry
+    usdt_address = get_contract_address("USDT_BSC", "mainnet")
+    erc20_abi = get_contract_abi("ERC20")
 
-    # Load ERC20 ABI
-    with open("examples/abis/erc20.json", "r") as f:
-        erc20_abi = json.load(f)
+    # Add ABI-based log filter - automatically decodes logs!
+    listener.add_abi_log_filter(
+        abi=erc20_abi, address=usdt_address, event_name="Transfer"
+    )
 
-    # Option 1: Add filter using ABI and event name - automatically decodes logs!
-    listener.add_abi_log_filter(abi=erc20_abi, address=USDT, event_name="Transfer")
+    # Alternative: Add filter using topic hash (returns raw logs)
+    # listener.add_abi_log_filter(
+    #     address=usdt_address,
+    #     topics=["0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"]
+    # )
 
-    # Option 2: Add filter using topic hash - returns raw logs
-    # TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
-    # listener.add_abi_log_filter(address=USDT, topics=[TRANSFER_TOPIC])
+    # Register event handlers using utility functions
+    listener.on("block", create_block_handler())
+    listener.on(
+        "log", create_log_handler(exit_after_first=False)
+    )  # Set to True for testing
+    listener.on("error", create_error_handler())
 
-    # ── Register async callbacks ─────────────────────────────────────
-    listener.on("block", on_block)
-    listener.on("log", on_log)
-    listener.on("error", on_error)
-
-    print("Starting HTTP polling listener... (Ctrl+C to stop)\n")
-
-    try:
-        await listener.start()
-    except KeyboardInterrupt:
-        print("\nStop requested.")
-        listener.stop()
-    except Exception as exc:
-        print(f"Fatal error: {exc}")
-        listener.stop()
+    # Run the listener with proper error handling
+    await run_listener(
+        listener=listener,
+        startup_message="Starting HTTP polling listener...",
+        shutdown_message="HTTP listener stopped.",
+    )
 
 
 if __name__ == "__main__":

@@ -2,30 +2,10 @@ import asyncio
 import json
 import logging
 from typing import Callable, Awaitable, Any
-from enum import Enum
 import aiohttp
 from web3 import Web3
 from chain_sniper.parser.log_decoder import LogDecoder
-
-
-class BlockDetail(str, Enum):
-    """Controls how much block data is fetched."""
-
-    HEADER = "header"  # only the block header (eth_getBlockByNumber, no txs)
-    FULL_BLOCK = (
-        "full_block"  # header + all transactions (eth_getBlockByNumber, full txs)
-    )
-
-
-class _IdGen:
-    """Thread-safe monotonically increasing JSON-RPC id generator."""
-
-    def __init__(self) -> None:
-        self._n = 0
-
-    def next(self) -> int:
-        self._n += 1
-        return self._n
+from chain_sniper.listener.common import BlockDetail, _IdGen
 
 
 class HttpListener:

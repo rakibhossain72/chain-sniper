@@ -1,23 +1,18 @@
 import asyncio
-import logging
-import os
 from typing import Any
 
-import dotenv
-
-from chain_sniper.listener.websocket_listener import WebSocketListener, BlockDetail
+from chain_sniper.utils.config import get_rpc_url
+from chain_sniper.utils.logging import setup_logging
+from chain_sniper.utils.runner import create_websocket_listener
 from chain_sniper.engine.pipeline import Pipeline
 from chain_sniper.filters.dynamic_filter import DynamicFilter
 from chain_sniper.listener.redis_rule_listener import RedisRuleListener
 from chain_sniper.abstracts.base_strategy import BaseStrategy
 
 
-dotenv.load_dotenv()
-RPC_URL = os.getenv("RPC_URL")
-
-
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+# Load configuration and setup logging
+RPC_URL = get_rpc_url()
+logger = setup_logging(level="INFO", logger_name=__name__)
 
 
 class Strategy(BaseStrategy):
@@ -43,16 +38,8 @@ class Strategy(BaseStrategy):
         # Add your custom logic here
         # for example, save to database, send notification, etc.
 
-    async def execute_log(self, log):
-        print(
-            f"Transection hash: {log.get('transactionHash')} Amount: {int(log.get('data', '0x')[-64:], 16) / (10**18)} USDT"
-        )
-        # Add your custom logic here
-        # for example, save to database, send notification, etc.
-
 
 async def main():
-
     # 1. Initialize the dynamic filter
     dyn_filter = DynamicFilter()
 
@@ -62,7 +49,12 @@ async def main():
     # 3. Initialize pipeline with dynamic filter
     pipeline = Pipeline(filter=dyn_filter, strategy=Strategy())
 
-    listener = WebSocketListener(RPC_URL, block_detail=BlockDetail.FULL_BLOCK)
+    # Create WebSocket listener using utility function
+    listener = create_websocket_listener(
+        rpc_url=RPC_URL,
+        block_detail="full_block",
+        logger=logger,
+    )
 
     # 4. Initialize Background Rule Listener (Redis)
     rule_listener = RedisRuleListener(dynamic_filter=dyn_filter)

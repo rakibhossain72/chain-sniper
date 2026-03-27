@@ -1,15 +1,15 @@
 import asyncio
 import logging
 from typing import Any
-from chain_sniper.listener.poll_listener import HttpListener, BlockDetail
+from chain_sniper.listener import HttpListener, BlockDetail
 
 # ==============================
 # LOGGING SETUP
 # ==============================
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s | %(levelname)-7s | %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
+    format="%(asctime)s | %(levelname)-7s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger("BNB-Watch")
 
@@ -33,10 +33,9 @@ async def main():
         except Exception as e:
             logger.error("Crashed while processing block → %s", e, exc_info=True)
 
-
     async def handle_error(exc: Exception) -> None:
         logger.error("Listener error → %s", exc)
-    
+
     listener.on("block", handle_block)
     listener.on("error", handle_error)
 
