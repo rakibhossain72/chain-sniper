@@ -6,12 +6,14 @@ from chain_sniper.abstracts.base_strategy import BaseStrategy
 
 class Pipeline:
 
-    def __init__(self, filter: BaseFilter | None = None, strategy: BaseStrategy | None = None):
+    def __init__(
+        self, filter: BaseFilter | None = None, strategy: BaseStrategy | None = None
+    ) -> None:
 
         self.filter = filter
         self.strategy = strategy
 
-    async def process_block(self, block):
+    async def process_block(self, block) -> None:
         txs = parse_block(block)
 
         for tx in txs:
@@ -20,7 +22,7 @@ class Pipeline:
 
                 await self.strategy.execute(tx)
 
-    async def process_log(self, log):
+    async def process_log(self, log) -> None:
         log = parse_log(log)
         if self.filter and self.filter.match_log(log):
             await self.strategy.execute_log(log)

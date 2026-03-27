@@ -68,9 +68,10 @@ class LogDecoder:
 # Provide a module-level singleton instance for convenience
 _default_decoder = LogDecoder()
 
-def parse_log(log: dict, abi=None):
+
+def parse_log(log: dict, abi=None) -> dict:
     """
-    Parses a log dictionary. 
+    Parses a log dictionary.
     If ABI is provided, will return a decoded log dictionary.
     """
     return _default_decoder.decode_log(log, abi)
