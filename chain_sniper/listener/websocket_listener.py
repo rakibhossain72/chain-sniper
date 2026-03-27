@@ -4,9 +4,8 @@ import logging
 from typing import Callable, Awaitable, Any
 import websockets
 from websockets.exceptions import ConnectionClosed
-from web3 import Web3
-from chain_sniper.parser.log_decoder import LogDecoder
 from chain_sniper.listener.common import BlockDetail, _IdGen
+from chain_sniper.utils.abi_filter import ABIFilterRegistry
 
 
 class WebSocketListener:
@@ -49,9 +48,8 @@ class WebSocketListener:
 
         self._sub_map: dict[str, str] = {}  # sub_id → "block" | "log"
 
-        # ABI storage for decoding: (address, topic) -> abi
-        self._abi_map: dict[tuple[str | None, str | None], list] = {}
-        self._log_decoder = LogDecoder()
+        # ABI filter registry for decoding logs
+        self._abi_filter = ABIFilterRegistry()
 
     def on(
         self, event: str, callback: Callable[..., Awaitable[None]]
@@ -125,44 +123,12 @@ class WebSocketListener:
         if abi is None or event_name is None:
             raise ValueError("Either provide topics or both abi and event_name")
 
-        if isinstance(abi, str):
-            abi = json.loads(abi)
+        # Register with ABI filter registry for decoding
+        generated_topics = self._abi_filter.register_abi_filter(
+            abi=abi, address=address, event_name=event_name
+        )
 
-        w3 = Web3()
-        contract = w3.eth.contract(abi=abi)
-
-        topics = None
-        if event_name:
-            event = getattr(contract.events, event_name)()
-            # Get the event signature topic
-            topics = [event.topic]
-
-        # Store ABI for decoding
-        if address and isinstance(address, str):
-            addresses = [address]
-        elif address and isinstance(address, list):
-            addresses = address
-        else:
-            addresses = [None]  # No address filter
-
-        for addr in addresses:
-            # Normalize address to lowercase for consistent lookup
-            addr_lower = addr.lower() if addr else None
-            if topics:
-                # Store ABI for each topic (assuming topics[0] is event signature)
-                for topic in topics:
-                    if isinstance(topic, str):
-                        self._abi_map[(addr_lower, topic)] = abi
-                    elif isinstance(topic, list):
-                        # Handle nested OR lists
-                        for sub_topic in topic:
-                            if isinstance(sub_topic, str):
-                                self._abi_map[(addr_lower, sub_topic)] = abi
-            else:
-                # If no specific event, store for all events from this address
-                self._abi_map[(addr_lower, None)] = abi
-
-        self.add_log_filter(address=address, topics=topics)
+        self.add_log_filter(address=address, topics=generated_topics)
 
     async def _emit(self, event: str, payload: Any) -> None:
         for cb in self._listeners.get(event, []):
@@ -284,20 +250,7 @@ class WebSocketListener:
 
     def _decode_log(self, log: dict) -> dict:
         """Decode log using stored ABI if available."""
-        address = log.get("address")
-        address_lower = address.lower() if address else None
-        topics = log.get("topics", [])
-        if topics:
-            topic = topics[0]
-            # Try exact match
-            abi = self._abi_map.get((address_lower, topic))
-            if abi:
-                return self._log_decoder.decode_log(log, abi)
-            # Try address only
-            abi = self._abi_map.get((address_lower, None))
-            if abi:
-                return self._log_decoder.decode_log(log, abi)
-        return log
+        return self._abi_filter.decode_log(log)
 
     def stop(self) -> None:
         """Signal the listener to stop after the current iteration."""
