@@ -48,9 +48,7 @@ registry = ContractRegistry()
 # Register common contracts
 try:
     # ERC20 standard ABI
-    erc20_abi_path = os.path.join(
-        os.path.dirname(__file__), "..", "..", "examples", "abis", "erc20.json"
-    )
+    erc20_abi_path = os.path.join(os.path.dirname(__file__), "abis", "erc20.json")
     erc20_abi = load_abi_from_file(erc20_abi_path)
 
     # Register ERC20 standard
