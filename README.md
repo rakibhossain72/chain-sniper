@@ -128,6 +128,8 @@ Check out the `examples/` directory for more advanced usage:
 
 Chain Sniper supports easy event filtering using contract ABIs instead of topic hashes. This makes it user-friendly and automatically decodes logs into readable parameters.
 
+### Using ABI and Event Name (Recommended)
+
 ```python
 import json
 from chain_sniper.listener.websocket_listener import WebSocketListener
@@ -151,6 +153,24 @@ async def on_decoded_log(log):
     if log.get("event") == "Transfer":
         args = log["args"]
         print(f"Transfer: {args['from']} -> {args['to']}: {args['value']}")
+```
+
+### Using Topic Hashes (Raw Logs)
+
+For cases where you prefer raw logs or don't have the ABI:
+
+```python
+listener.add_abi_log_filter(
+    address="0x...",
+    topics=["0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"]
+)
+
+# Logs remain raw (not decoded)
+@listener.on("log")
+async def on_raw_log(log):
+    data = log.get("data", "0x")
+    amount = int(data[-64:], 16) / (10 ** 18)
+    print(f"Raw transfer amount: {amount}")
 ```
 
 ## Updating Dynamic Rules

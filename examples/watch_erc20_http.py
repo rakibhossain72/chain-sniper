@@ -28,6 +28,8 @@ async def on_block(block: dict) -> None:
 
 
 async def on_log(log: dict) -> None:
+    print(log)
+    exit(0)
     addr = log.get("address", "???")
     # Check if log is decoded
     if "event" in log:
@@ -62,8 +64,12 @@ async def main() -> None:
     with open("examples/abis/erc20.json", "r") as f:
         erc20_abi = json.load(f)
 
-    # Add filter using ABI and event name - much simpler!
+    # Option 1: Add filter using ABI and event name - automatically decodes logs!
     listener.add_abi_log_filter(abi=erc20_abi, address=USDT, event_name="Transfer")
+
+    # Option 2: Add filter using topic hash - returns raw logs
+    # TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+    # listener.add_abi_log_filter(address=USDT, topics=[TRANSFER_TOPIC])
 
     # ── Register async callbacks ─────────────────────────────────────
     listener.on("block", on_block)

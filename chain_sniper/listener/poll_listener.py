@@ -142,21 +142,31 @@ class HttpListener:
 
     def add_abi_log_filter(
         self,
-        abi: list | str,
+        abi: list | str | None = None,
         address: str | list[str] | None = None,
         event_name: str | None = None,
+        topics: list[str | list[str] | None] | None = None,
     ) -> None:
         """
-        Queue a log/event subscription using ABI and event name.
+        Queue a log/event subscription using ABI/event name or topic hashes.
 
         Args:
-            abi: Contract ABI as list or JSON string.
+            abi: Contract ABI as list or JSON string (optional if using topics).
             address: Contract address or list of addresses to watch.
             event_name: Name of the event to filter (e.g., "Transfer").
+            topics: EVM topic filter (alternative to abi+event_name).
 
-        If event_name is provided, it will generate the topic hash from the ABI.
-        If not, it subscribes to all events from the contract.
+        When using abi+event_name, logs will be automatically decoded.
+        When using topics, logs will remain raw.
         """
+        if topics is not None:
+            # Use provided topics - no decoding
+            self.add_log_filter(address=address, topics=topics)
+            return
+
+        if abi is None or event_name is None:
+            raise ValueError("Either provide topics or both abi and event_name")
+
         if isinstance(abi, str):
             abi = json.loads(abi)
 
@@ -178,12 +188,21 @@ class HttpListener:
             addresses = [None]  # No address filter
 
         for addr in addresses:
+            # Normalize address to lowercase for consistent lookup
+            addr_lower = addr.lower() if addr else None
             if topics:
+                # Store ABI for each topic (assuming topics[0] is event signature)
                 for topic in topics:
-                    self._abi_map[(addr, topic)] = abi
+                    if isinstance(topic, str):
+                        self._abi_map[(addr_lower, topic)] = abi
+                    elif isinstance(topic, list):
+                        # Handle nested OR lists
+                        for sub_topic in topic:
+                            if isinstance(sub_topic, str):
+                                self._abi_map[(addr_lower, sub_topic)] = abi
             else:
                 # If no specific event, store for all events from this address
-                self._abi_map[(addr, None)] = abi
+                self._abi_map[(addr_lower, None)] = abi
 
         self.add_log_filter(address=address, topics=topics)
 
@@ -232,15 +251,16 @@ class HttpListener:
     def _decode_log(self, log: dict) -> dict:
         """Decode log using stored ABI if available."""
         address = log.get("address")
+        address_lower = address.lower() if address else None
         topics = log.get("topics", [])
         if topics:
             topic = topics[0]
             # Try exact match
-            abi = self._abi_map.get((address, topic))
+            abi = self._abi_map.get((address_lower, topic))
             if abi:
                 return self._log_decoder.decode_log(log, abi)
             # Try address only
-            abi = self._abi_map.get((address, None))
+            abi = self._abi_map.get((address_lower, None))
             if abi:
                 return self._log_decoder.decode_log(log, abi)
         return log
@@ -393,13 +413,13 @@ class HttpListener:
                     await self._emit("log", decoded_log)
             except Exception as exc:
                 self.logger.warning(
-                    "eth_getFilterChanges failed for filter %s: %s — reinstalling",
+                    "eth_getFilterChanges failed for filter %s: %s — switching to eth_getLogs",
                     filter_id,
                     exc,
                 )
-                # Filter may have expired; reinstall on next reconnect cycle
+                # Filter may have expired; switch to fallback method
                 self._use_filter_api = False
-                await self._emit("error", exc)
+                # Don't emit error for filter expiration, it's expected
                 return
 
     async def _poll_logs_via_getlogs(self) -> None:
