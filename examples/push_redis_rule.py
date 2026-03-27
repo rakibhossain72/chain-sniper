@@ -36,8 +36,8 @@ if __name__ == "__main__":
     elif action == 'tx':
         print("Pushing a tx rule looking for interactions with a specific address...")
         push_rule('tx', {
-            "to": "0x0000000000000000000000000000000000001000",
-            "value": {"_op": "$gt", "_value": 1000}
+            # "to": "0x0000000000000000000000000000000000001000",
+            "value": {"_op": "$lt", "_value": 1000}
         })
     else:
         print("Usage: python push_redis_rule.py [log|tx]")

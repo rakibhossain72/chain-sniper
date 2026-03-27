@@ -4,13 +4,14 @@ from web3 import Web3
 
 logger = logging.getLogger(__name__)
 
+
 class LogDecoder:
     """
     Decodes Ethereum smart contract logs.
     If an ABI is provided, it will attempt to match the log
     to the contract events and decode the data/topics into readable parameters.
     """
-    def __init__(self, w3: Web3 = None):
+    def __init__(self, w3: Web3 = None) -> None:
         # We can use a disconnected Web3 instance just for decoding logic
         self.w3 = w3 or Web3()
         # Cache for instantiated contract objects to avoid recreating them for the same ABI

@@ -4,15 +4,22 @@ import logging
 from typing import Callable, Awaitable, Any
 from enum import Enum
 import aiohttp
+from web3 import Web3
+from chain_sniper.parser.log_decoder import LogDecoder
+
 
 class BlockDetail(str, Enum):
     """Controls how much block data is fetched."""
-    HEADER     = "header"      # only the block header (eth_getBlockByNumber, no txs)
-    FULL_BLOCK = "full_block"  # header + all transactions (eth_getBlockByNumber, full txs)
+
+    HEADER = "header"  # only the block header (eth_getBlockByNumber, no txs)
+    FULL_BLOCK = (
+        "full_block"  # header + all transactions (eth_getBlockByNumber, full txs)
+    )
 
 
 class _IdGen:
     """Thread-safe monotonically increasing JSON-RPC id generator."""
+
     def __init__(self) -> None:
         self._n = 0
 
@@ -50,31 +57,39 @@ class HttpListener:
         poll_interval: float = 2.0,
         logger: logging.Logger | None = None,
     ) -> None:
-        self.rpc_url             = rpc_url
-        self.block_detail        = block_detail
-        self.reconnect_delay     = reconnect_delay
+        self.rpc_url = rpc_url
+        self.block_detail = block_detail
+        self.reconnect_delay = reconnect_delay
         self.max_reconnect_delay = max_reconnect_delay
-        self.poll_interval       = poll_interval
+        self.poll_interval = poll_interval
         self.logger = logger or logging.getLogger("HttpListener")
 
-        self._ids     = _IdGen()
+        self._ids = _IdGen()
         self._running = False
-        self._session: aiohttp.ClientSession | None = None  # live session, kept for _rpc()
+        self._session: aiohttp.ClientSession | None = (
+            None  # live session, kept for _rpc()
+        )
 
         # ── Callbacks ──────────────────────────────────────────────────────
         # key → list of async callables
         self._listeners: dict[str, list[Callable[..., Awaitable[None]]]] = {
             "block": [],
-            "log":   [],
+            "log": [],
             "error": [],
         }
         # Each entry: {"address": ..., "topics": ..., "filter_id": None}
         self._log_filters: list[dict] = []
 
+        # ABI storage for decoding: (address, topic) -> abi
+        self._abi_map: dict[tuple[str | None, str | None], list] = {}
+        self._log_decoder = LogDecoder()
+
         # ── State ──────────────────────────────────────────────────────────
-        self._last_block_number: int | None = None   # highest block we've already emitted
-        self._filter_ids: list[str] = []             # eth_newFilter IDs (if node supports it)
-        self._use_filter_api = True                  # flip to False if node rejects eth_newFilter
+        self._last_block_number: int | None = (
+            None  # highest block we've already emitted
+        )
+        self._filter_ids: list[str] = []  # eth_newFilter IDs (if node supports it)
+        self._use_filter_api = True  # flip to False if node rejects eth_newFilter
 
     # ──────────────────────────────────────────────────────────────────────
     # Public API  (identical signatures to WebSocketListener)
@@ -121,7 +136,56 @@ class HttpListener:
                 topics=["0xddf252ad..."],   # Transfer(address,address,uint256)
             )
         """
-        self._log_filters.append({"address": address, "topics": topics, "filter_id": None})
+        self._log_filters.append(
+            {"address": address, "topics": topics, "filter_id": None}
+        )
+
+    def add_abi_log_filter(
+        self,
+        abi: list | str,
+        address: str | list[str] | None = None,
+        event_name: str | None = None,
+    ) -> None:
+        """
+        Queue a log/event subscription using ABI and event name.
+
+        Args:
+            abi: Contract ABI as list or JSON string.
+            address: Contract address or list of addresses to watch.
+            event_name: Name of the event to filter (e.g., "Transfer").
+
+        If event_name is provided, it will generate the topic hash from the ABI.
+        If not, it subscribes to all events from the contract.
+        """
+        if isinstance(abi, str):
+            abi = json.loads(abi)
+
+        w3 = Web3()
+        contract = w3.eth.contract(abi=abi)
+
+        topics = None
+        if event_name:
+            event = getattr(contract.events, event_name)()
+            # Get the event signature topic
+            topics = [event.topic]
+
+        # Store ABI for decoding
+        if address and isinstance(address, str):
+            addresses = [address]
+        elif address and isinstance(address, list):
+            addresses = address
+        else:
+            addresses = [None]  # No address filter
+
+        for addr in addresses:
+            if topics:
+                for topic in topics:
+                    self._abi_map[(addr, topic)] = abi
+            else:
+                # If no specific event, store for all events from this address
+                self._abi_map[(addr, None)] = abi
+
+        self.add_log_filter(address=address, topics=topics)
 
     async def start(self) -> None:
         """Connect, subscribe, and run until :meth:`stop` is called."""
@@ -165,6 +229,22 @@ class HttpListener:
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, self.max_reconnect_delay)
 
+    def _decode_log(self, log: dict) -> dict:
+        """Decode log using stored ABI if available."""
+        address = log.get("address")
+        topics = log.get("topics", [])
+        if topics:
+            topic = topics[0]
+            # Try exact match
+            abi = self._abi_map.get((address, topic))
+            if abi:
+                return self._log_decoder.decode_log(log, abi)
+            # Try address only
+            abi = self._abi_map.get((address, None))
+            if abi:
+                return self._log_decoder.decode_log(log, abi)
+        return log
+
     def stop(self) -> None:
         """Signal the listener to stop after the current iteration."""
         self._running = False
@@ -188,9 +268,9 @@ class HttpListener:
 
         payload = {
             "jsonrpc": "2.0",
-            "id":      self._ids.next(),
-            "method":  method,
-            "params":  params,
+            "id": self._ids.next(),
+            "method": method,
+            "params": params,
         }
         async with self._session.post(
             self.rpc_url,
@@ -281,7 +361,9 @@ class HttpListener:
                 fid = await self._rpc("eth_newFilter", [params])
                 flt["filter_id"] = fid
                 self._filter_ids.append(fid)
-                self.logger.info("Installed eth_newFilter → filter_id=%s  params=%s", fid, params)
+                self.logger.info(
+                    "Installed eth_newFilter → filter_id=%s  params=%s", fid, params
+                )
 
         except Exception:
             self._use_filter_api = False
@@ -307,11 +389,13 @@ class HttpListener:
             try:
                 logs = await self._rpc("eth_getFilterChanges", [filter_id])
                 for log in logs or []:
-                    await self._emit("log", log)
+                    decoded_log = self._decode_log(log)
+                    await self._emit("log", decoded_log)
             except Exception as exc:
                 self.logger.warning(
                     "eth_getFilterChanges failed for filter %s: %s — reinstalling",
-                    filter_id, exc,
+                    filter_id,
+                    exc,
                 )
                 # Filter may have expired; reinstall on next reconnect cycle
                 self._use_filter_api = False
@@ -327,7 +411,7 @@ class HttpListener:
             return
 
         from_block = hex(self._last_block_number)
-        to_block   = "latest"
+        to_block = "latest"
 
         for flt in self._log_filters:
             params: dict = {"fromBlock": from_block, "toBlock": to_block}
@@ -338,7 +422,8 @@ class HttpListener:
             try:
                 logs = await self._rpc("eth_getLogs", [params])
                 for log in logs or []:
-                    await self._emit("log", log)
+                    decoded_log = self._decode_log(log)
+                    await self._emit("log", decoded_log)
             except Exception as exc:
                 self.logger.error("eth_getLogs failed: %s", exc)
                 await self._emit("error", exc)

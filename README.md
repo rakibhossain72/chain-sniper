@@ -9,13 +9,14 @@ Chain Sniper provides a robust set of tools for monitoring blockchain activities
 ### Key Features
 
 -  **Multi-Chain Support**: Compatible with any EVM-compatible chain (Ethereum, BSC, Polygon, Base, etc.).
--  **Flexible Listeners**: 
-  - `WebSocketListener`: Real-time block and log subscriptions.
-  - `PollListener`: Reliable HTTP polling with automatic fallback for nodes that don't support stateful filters.
-  - `RedisRuleListener`: Inject real-time filter rules while the system is running.
+-  **Flexible Listeners**:
+   - `WebSocketListener`: Real-time block and log subscriptions via WebSocket.
+   - `HttpListener` (`PollListener`): Reliable HTTP polling with automatic fallback for nodes that don't support stateful filters.
+   - `RedisRuleListener`: Inject real-time filter rules while the system is running.
 -  **Pipeline Architecture**: Clean separation of concerns using `Filters` and `Strategies`.
 -  **Auto-Recovery**: Built-in reconnection logic with exponential backoff.
 -  **Dynamic Filtering**: Modify your targeting criteria on the fly without restarting the service.
+-  **ABI-Based Event Filtering**: Add log filters using contract ABI and event names instead of cryptic topic hashes. Logs are automatically decoded into readable parameters.
 
 ## Project Structure
 
@@ -58,6 +59,11 @@ Alternatively, use `pip`:
 ```bash
 pip install -r pyproject.toml
 ```
+
+## Choosing Between WebSocket and HTTP
+
+- **WebSocketListener**: Best for real-time monitoring with low latency. Use when your RPC provider supports WebSocket subscriptions.
+- **HttpListener**: Use for RPC providers that only support HTTP, or when you need polling-based monitoring. Automatically falls back to `eth_getLogs` scanning if stateful filters aren't supported.
 
 ## Quick Start
 
@@ -115,8 +121,37 @@ uv run main.py
 Check out the `examples/` directory for more advanced usage:
 
 - Basic Monitoring: `watch_blocks.py`, `watch_blocks_poll.py`
-- Advanced Filtering: `watch_erc20.py`, `watch_native_wss.py`
+- Advanced Filtering: `watch_erc20.py`, `watch_erc20_http.py`, `watch_native_wss.py`
 - Dynamic Rules: `push_redis_rule.py`
+
+## ABI-Based Event Filtering
+
+Chain Sniper supports easy event filtering using contract ABIs instead of topic hashes. This makes it user-friendly and automatically decodes logs into readable parameters.
+
+```python
+import json
+from chain_sniper.listener.websocket_listener import WebSocketListener
+
+listener = WebSocketListener("wss://your-rpc-url")
+
+# Load your contract ABI
+with open("path/to/abi.json", "r") as f:
+    abi = json.load(f)
+
+# Add filter by event name - no need for topic hashes!
+listener.add_abi_log_filter(
+    abi=abi,
+    address="0x...",  # contract address
+    event_name="Transfer"  # event name from ABI
+)
+
+# Logs will be automatically decoded
+@listener.on("log")
+async def on_decoded_log(log):
+    if log.get("event") == "Transfer":
+        args = log["args"]
+        print(f"Transfer: {args['from']} -> {args['to']}: {args['value']}")
+```
 
 ## Updating Dynamic Rules
 

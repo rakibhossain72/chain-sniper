@@ -4,14 +4,10 @@ import os
 import dotenv
 import json
 
-from chain_sniper.listener.websocket_listener import (
-    WebSocketListener,
-    BlockDetail,
-)
+from chain_sniper.listener.poll_listener import HttpListener, BlockDetail
 
 dotenv.load_dotenv()
 RPC_URL = os.getenv("RPC_URL")
-
 
 logging.basicConfig(
     level=logging.INFO,
@@ -51,10 +47,12 @@ async def on_error(exc: Exception) -> None:
 
 
 async def main() -> None:
-    listener = WebSocketListener(
+    # Use HttpListener for HTTP polling instead of WebSocket
+    listener = HttpListener(
         RPC_URL,
         block_detail=BlockDetail.FULL_BLOCK,  # or .HEADER (not txs)
         logger=logger,
+        poll_interval=2.0,  # Poll every 2 seconds
     )
 
     # ── USDT on BSC (mainnet) ───────────────────────────────────────
@@ -68,11 +66,11 @@ async def main() -> None:
     listener.add_abi_log_filter(abi=erc20_abi, address=USDT, event_name="Transfer")
 
     # ── Register async callbacks ─────────────────────────────────────
-    # listener.on("block", on_block)
+    listener.on("block", on_block)
     listener.on("log", on_log)
-    # listener.on("error", on_error)
+    listener.on("error", on_error)
 
-    print("Starting WebSocket listener... (Ctrl+C to stop)\n")
+    print("Starting HTTP polling listener... (Ctrl+C to stop)\n")
 
     try:
         await listener.start()

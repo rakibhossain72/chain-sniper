@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import os
-
+from typing import Any
 
 import dotenv
 
@@ -20,25 +20,42 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 
-
 class Strategy(BaseStrategy):
-    async def execute(self, tx):
-        logger.info(f"Executing strategy for transaction: {tx}")
+    async def execute(self, data: Any) -> None:
+        logger.info(f"Executing strategy for transaction: {data}")
         # Add your custom logic here
         # for example, save to database, send notification, etc.
 
     async def execute_log(self, log):
-        print(f"Transection hash: {log.get('transactionHash')} Amount: {int(log.get('data', '0x')[-64:], 16) / (10 ** 18)} USDT")
+        # Check if decoded
+        if "event" in log and log["event"] == "Transfer":
+            args = log.get("args", {})
+            amount = args.get("value", 0) / (10**18)
+            print(
+                f"Transfer: {args.get('from')} → {args.get('to')} Amount: {amount} USDT"
+            )
+        else:
+            # Raw log
+            amount = int(log.get("data", "0x")[-64:], 16) / (10**18)
+            print(
+                f"Transaction hash: {log.get('transactionHash')} Amount: {amount} USDT"
+            )
         # Add your custom logic here
         # for example, save to database, send notification, etc.
 
+    async def execute_log(self, log):
+        print(
+            f"Transection hash: {log.get('transactionHash')} Amount: {int(log.get('data', '0x')[-64:], 16) / (10**18)} USDT"
+        )
+        # Add your custom logic here
+        # for example, save to database, send notification, etc.
 
 
 async def main():
 
     # 1. Initialize the dynamic filter
     dyn_filter = DynamicFilter()
-    
+
     # 2. Add an initial rule (optional)
     # dyn_filter.add_log_rule({"type": "log", "min_amount": 5000})
 
@@ -46,16 +63,20 @@ async def main():
     pipeline = Pipeline(filter=dyn_filter, strategy=Strategy())
 
     listener = WebSocketListener(RPC_URL, block_detail=BlockDetail.FULL_BLOCK)
-    
+
     # 4. Initialize Background Rule Listener (Redis)
     rule_listener = RedisRuleListener(dynamic_filter=dyn_filter)
 
     # Start the rule listener in the background
     await rule_listener.start()
 
-
     listener.on("block", pipeline.process_block)
-    # listener.add_log_filter(address="0x55d398326f99059fF775485246999027B3197955", topics=["0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"])
+
+    # Example: Add ABI-based log filter (much easier than topic hashes!)
+    # import json
+    # with open("examples/abis/erc20.json", "r") as f:
+    #     erc20_abi = json.load(f)
+    # listener.add_abi_log_filter(abi=erc20_abi, address="0x55d398326f99059fF775485246999027B3197955", event_name="Transfer")
     # listener.on("log", pipeline.process_log)
 
     # listener.on("log", pipeline.process_log)
