@@ -4,7 +4,7 @@ from typing import Any
 from web3 import AsyncWeb3
 from web3.providers.rpc import AsyncHTTPProvider
 from web3.middleware import ExtraDataToPOAMiddleware
-from chain_sniper.listener.websocket_listener import WebSocketListener
+from chain_sniper.listener import WebSocketListener
 
 # ==============================
 # LOGGING SETUP
@@ -115,5 +115,5 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         print("\nStopped by user.")
-    except Exception as e:
+    except Exception:
         logger.critical("Main loop fatal error", exc_info=True)

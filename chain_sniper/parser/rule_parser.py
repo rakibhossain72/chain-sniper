@@ -2,6 +2,7 @@ from typing import Any, Callable
 import re
 import logging
 
+
 class RuleMatcher:
     """
     Parses and evaluates rule conditions against a transaction.
@@ -21,28 +22,32 @@ class RuleMatcher:
 
     _OPERATORS: dict[str, Callable] = {
         # Comparison
-        "$eq":         lambda a, b: a == b,
-        "$ne":         lambda a, b: a != b,
-        "$gt":         lambda a, b: a > b,
-        "$gte":        lambda a, b: a >= b,
-        "$lt":         lambda a, b: a < b,
-        "$lte":        lambda a, b: a <= b,
-
+        "$eq": lambda a, b: a == b,
+        "$ne": lambda a, b: a != b,
+        "$gt": lambda a, b: a > b,
+        "$gte": lambda a, b: a >= b,
+        "$lt": lambda a, b: a < b,
+        "$lte": lambda a, b: a <= b,
         # String
-        "$contains":   lambda a, b: isinstance(a, str) and str(b).lower() in a.lower(),
-        "$startswith": lambda a, b: isinstance(a, str) and a.lower().startswith(str(b).lower()),
-        "$endswith":   lambda a, b: isinstance(a, str) and a.lower().endswith(str(b).lower()),
-        "$regex":      lambda a, b: bool(re.search(b, str(a))),
-
+        "$contains": lambda a, b: isinstance(a, str) and str(b).lower() in a.lower(),
+        "$startswith": lambda a, b: isinstance(a, str)
+        and a.lower().startswith(str(b).lower()),
+        "$endswith": lambda a, b: isinstance(a, str)
+        and a.lower().endswith(str(b).lower()),
+        "$regex": lambda a, b: bool(re.search(b, str(a))),
         # List
-        "$in":         lambda a, b: isinstance(b, list) and a in b,
-        "$nin":        lambda a, b: isinstance(b, list) and a not in b,
-
+        "$in": lambda a, b: isinstance(b, list) and a in b,
+        "$nin": lambda a, b: isinstance(b, list) and a not in b,
         # Existence
-        "$exists":     lambda a, b: (a is not None) == bool(b),
+        "$exists": lambda a, b: (a is not None) == bool(b),
     }
 
-    def __init__(self, case_sensitive: bool = False, strict_mode: bool = False, logger: logging.Logger = logging.getLogger(__name__)):
+    def __init__(
+        self,
+        case_sensitive: bool = False,
+        strict_mode: bool = False,
+        logger: logging.Logger = logging.getLogger(__name__),
+    ):
         """
         Args:
             case_sensitive : If False, string equality checks are case-insensitive (default: False).
@@ -70,22 +75,26 @@ class RuleMatcher:
 
         # Operator-based condition
         if isinstance(condition, dict):
-            op  = condition.get("_op")
+            op = condition.get("_op")
             val = condition.get("_value")
 
             if not op:
                 raise ValueError(f"Condition dict missing '_op': {condition}")
             if op not in self._OPERATORS:
-                raise ValueError(f"Unsupported operator '{op}'. Supported: {list(self._OPERATORS)}")
+                raise ValueError(
+                    f"Unsupported operator '{op}'. Supported: {list(self._OPERATORS)}"
+                )
 
             # Normalize only for string-comparison operators
             if op in ("$eq", "$ne", "$contains", "$startswith", "$endswith"):
                 tx_value = self._normalize(tx_value)
-                val      = self._normalize(val)
+                val = self._normalize(val)
 
             return self._OPERATORS[op](tx_value, val)
 
-        raise ValueError(f"Invalid condition format — expected scalar or dict, got: {type(condition)}")
+        raise ValueError(
+            f"Invalid condition format — expected scalar or dict, got: {type(condition)}"
+        )
 
     def match_rule(self, tx: dict, rule: dict) -> bool:
         """

@@ -29,7 +29,6 @@ USDT = "0x55d398326f99059fF775485246999027B3197955"
 
 # BSC RPC endpoints (multiple for fault tolerance)
 BSC_RPCS = [
-    "wss://bnb-mainnet.g.alchemy.com/v2/zVuCDSrlJMGM9_S0BiKXa",
     "wss://bsc-ws-node.nariox.org:443",
     "wss://bsc-dataseed.binance.org/",
 ]

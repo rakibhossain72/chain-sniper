@@ -1,22 +1,19 @@
 import asyncio
 import logging
 from typing import Any
-from chain_sniper.listener.websocket_listener import WebSocketListener
+from chain_sniper.listener import WebSocketListener
 
-# ==============================
 # LOGGING SETUP
-# ==============================
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s | %(levelname)-7s | %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
+    format="%(asctime)s | %(levelname)-7s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger("BNB-Watch")
 
-# ==============================
 # CONFIGURATION
-# ==============================
-RPC_WS  = "wss://bsc.drpc.org"
+RPC_WS = "wss://bsc.drpc.org"
+
 
 async def handle_block(block_header: dict[str, Any]) -> None:
     """
@@ -26,10 +23,12 @@ async def handle_block(block_header: dict[str, Any]) -> None:
         block_number = int(block_header["number"], 16)
         logger.info("New block: %d", block_number)
     except Exception as e:
-        logger.error("Crashed while processing block %s → %s", block_number, e, exc_info=True)
+        logger.error(
+            "Crashed at block %s → %s", block_number, e, exc_info=True
+        )
 
 
-async def main():
+async def main() -> None:
     try:
         listener = WebSocketListener(RPC_WS)
         listener.on("block", handle_block)
@@ -50,5 +49,5 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         print("\nStopped by user.")
-    except Exception as e:
+    except Exception:
         logger.critical("Main loop fatal error", exc_info=True)
