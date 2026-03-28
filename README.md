@@ -1,45 +1,100 @@
 # Chain Sniper
 
-A high-performance Ethereum/EVM blockchain listener and transaction monitor.
+⚡ **Simple blockchain event monitoring with automatic decoding**
 
-## Overview
+Monitor ERC20 transfers, NFT mints, and any smart contract events with just a few lines of code. Chain Sniper automatically decodes events using contract ABIs and provides a clean, builder-pattern API.
 
-Chain Sniper provides a robust set of tools for monitoring blockchain activities in real-time. It features a scalable, memory-safe, and clean architecture based on a pipeline pattern (Listener → Parser → Filters → Strategy → Output). It supports both **WebSocket subscriptions** for low-latency updates, **HTTP polling** for fallback logic, and **Redis-based Dynamic Filtering**.
+## Quick Start
 
-### Key Features
+### Watch ERC20 Transfers (5 lines!)
 
--  **Multi-Chain Support**: Compatible with any EVM-compatible chain (Ethereum, BSC, Polygon, Base, etc.).
--  **Flexible Listeners**:
-   - `WebSocketListener`: Real-time block and log subscriptions via WebSocket.
-   - `HttpListener` (`PollListener`): Reliable HTTP polling with automatic fallback for nodes that don't support stateful filters.
-   - `RedisRuleListener`: Inject real-time filter rules while the system is running.
--  **Pipeline Architecture**: Clean separation of concerns using `Filters` and `Strategies`.
--  **Auto-Recovery**: Built-in reconnection logic with exponential backoff.
--  **Dynamic Filtering**: Modify your targeting criteria on the fly without restarting the service.
--  **ABI-Based Event Filtering**: Add log filters using contract ABI and event names instead of cryptic topic hashes. Logs are automatically decoded into readable parameters.
+```python
+from chain_sniper import ChainSniper
+
+# Custom ERC20 ABI for Transfer event
+ERC20_ABI = [
+    {
+        "anonymous": False,
+        "inputs": [
+            {"indexed": True, "name": "from", "type": "address"},
+            {"indexed": True, "name": "to", "type": "address"},
+            {"indexed": False, "name": "value", "type": "uint256"},
+        ],
+        "name": "Transfer",
+        "type": "event",
+    }
+]
+
+# Monitor USDT transfers on BSC
+sniper = (
+    ChainSniper("wss://bsc-ws-node.nariox.org:443")
+    .watch(abi=ERC20_ABI, address="0x55d398326f99059fF775485246999027B3197955", event="Transfer")
+    .on_event(lambda log: print(f"Transfer: {log['args']['value']/10**18} USDT"))
+)
+
+await sniper.start()
+```
+
+### Advanced Filtering
+
+```python
+from chain_sniper import ChainSniper, DynamicFilter
+
+# Only show transfers > 1000 USDT
+filter = DynamicFilter()
+filter.add_log_rule({"args.value": {"_op": "$gte", "_value": 1000000000000000000000}})  # 1000 * 10^18
+
+sniper = (
+    ChainSniper("wss://bsc-ws-node.nariox.org:443")
+    .watch(abi=ERC20_ABI, address="0x55d398326f99059fF775485246999027B3197955", event="Transfer")
+    .filter(filter)
+    .on_event(lambda log: print(f"Big transfer: {log['args']['value']/10**18} USDT"))
+)
+```
+
+### HTTP Polling (for nodes without WebSocket)
+
+```python
+sniper = (
+    ChainSniper("https://bsc-dataseed.binance.org/")  # HTTP URL = auto HTTP polling
+    .watch(abi=ERC20_ABI, address="0x...", event="Transfer")
+    .on_event(handler)
+)
+```
 
 ## Project Structure
 
-The project has been organized into a cohesive python package:
+Clean, modular architecture focused on simplicity:
 
 ```text
 chain-sniper/
-├── chain_sniper/               # The main library package
-│   ├── abstracts/              # Base classes (Strategy, Filter)
-│   ├── chains/                 # Chain-specific configuration/logic
-│   ├── cli/                    # CLI handling points
-│   ├── core/                   # Utilities, configuration, exceptions
-│   ├── engine/                 # Processing pipeline logic
-│   ├── execution/              # Request and webhook executions
-│   ├── filters/                # User and dynamic filters
-│   ├── listener/               # WebSocket, poll, and Redis listeners
-│   ├── parser/                 # Block, tx, and rule parsing
-│   ├── storage/                # State and redis logic
-│   ├── strategy/               # Trading/execution strategies
-│   └── workers/                # Async task workers
-├── examples/                   # Standalone scripts to demonstrate usage
-├── tests/                      # Testing directory
-└── main.py                     # Entry point for your application
+├── chain_sniper/
+│   ├── __init__.py             # Main exports: ChainSniper, DynamicFilter, etc.
+│   ├── sniper.py               # ChainSniper builder class (main API)
+│   ├── types.py                # Type aliases and protocols
+│   ├── listener/               # Event listeners
+│   │   ├── common.py           # Shared types (BlockDetail, _IdGen)
+│   │   ├── websocket_listener.py # Real-time WebSocket monitoring
+│   │   ├── poll_listener.py    # HTTP polling fallback
+│   │   └── redis_rule_listener.py # Dynamic rule injection
+│   ├── parser/                 # Data parsing and decoding
+│   │   ├── log_decoder.py      # ABI-based event decoding
+│   │   ├── block_parser.py     # Transaction extraction
+│   │   └── rule_parser.py      # MongoDB-style rule matching
+│   ├── filters/                # Event/transaction filtering
+│   │   ├── base.py             # BaseFilter interface
+│   │   ├── dynamic_filter.py   # Advanced rule-based filtering
+│   │   ├── transfer_filter.py  # Simple address filtering
+│   │   └── contract_call_filter.py # Contract-based filtering
+│   └── utils/                  # Shared utilities
+│       ├── abi_filter.py       # Shared ABI filtering logic
+│       ├── config.py           # Environment configuration
+│       ├── logging.py          # Logging setup
+│       ├── abis.py             # ABI loading utilities
+│       ├── handlers.py         # Event handler factories
+│       └── runner.py           # Listener execution utilities
+├── examples/                   # Usage examples
+└── main.py                     # Legacy pipeline example
 ```
 
 ## Installation
@@ -60,6 +115,73 @@ Alternatively, use `pip`:
 pip install -r pyproject.toml
 ```
 
+## API Reference
+
+### ChainSniper
+
+Builder-pattern API for blockchain monitoring.
+
+```python
+from chain_sniper import ChainSniper, DynamicFilter
+
+# Custom ERC20 ABI
+ERC20_ABI = [
+    {
+        "anonymous": False,
+        "inputs": [
+            {"indexed": True, "name": "from", "type": "address"},
+            {"indexed": True, "name": "to", "type": "address"},
+            {"indexed": False, "name": "value", "type": "uint256"},
+        ],
+        "name": "Transfer",
+        "type": "event",
+    }
+]
+
+# Basic usage
+sniper = (
+    ChainSniper("wss://your-rpc")
+    .watch(abi=ERC20_ABI, address="0x...", event="Transfer")
+    .on_event(lambda log: print(log["args"]))
+)
+await sniper.start()
+
+# With filtering
+filter = DynamicFilter()
+filter.add_log_rule({"args.value": {"_op": "$gte", "_value": 1000000}})
+
+sniper = (
+    ChainSniper("https://your-rpc")  # Auto-detects HTTP polling
+    .watch(abi=ERC20_ABI, address="0x...", event="Transfer")
+    .filter(filter)
+    .on_event(your_handler)
+)
+```
+
+#### Constructor
+- `ChainSniper(rpc_url: str)` - WebSocket or HTTP RPC URL
+
+#### Methods
+- `.watch(abi, address, event, topics)` - Watch contract events
+- `.filter(filter_obj, **rules)` - Add filtering logic
+- `.on_event(callback)` - Handle decoded log events
+- `.on_block(callback)` - Handle new blocks
+- `.on_error(callback)` - Handle errors
+- `.block_detail("header"|"full_block")` - Set block detail level
+- `.poll_interval(seconds)` - HTTP polling interval
+- `.start()` - Begin monitoring
+- `.stop()` - Stop monitoring
+
+### DynamicFilter
+
+MongoDB-style rule matching with operators like `$gt`, `$gte`, `$in`, `$regex`, etc.
+
+```python
+filter = DynamicFilter()
+filter.add_log_rule({"args.value": {"_op": "$gte", "_value": 1000000}})
+filter.add_tx_rule({"to": "0x123...", "value": {"_op": "$gt", "_value": 0}})
+```
+
 ## Choosing Between WebSocket and HTTP
 
 - **WebSocketListener**: Best for real-time monitoring with low latency. Use when your RPC provider supports WebSocket subscriptions.
@@ -72,7 +194,6 @@ Chain Sniper now includes reusable modules for common tasks:
 - **`chain_sniper.utils.config`**: Configuration management (env vars, RPC URLs)
 - **`chain_sniper.utils.logging`**: Consistent logging setup
 - **`chain_sniper.utils.abis`**: ABI loading and manipulation utilities
-- **`chain_sniper.contracts`**: Pre-registered contracts with ABIs and addresses
 - **`chain_sniper.utils.handlers`**: Reusable event handler factories
 - **`chain_sniper.utils.runner`**: Listener creation and execution utilities
 
@@ -86,7 +207,23 @@ from chain_sniper.utils import (
     get_rpc_url, setup_logging, create_websocket_listener,
     create_block_handler, create_log_handler, create_error_handler, run_listener
 )
-from chain_sniper.contracts import get_contract_abi, get_contract_address
+
+# Custom ERC20 ABI for Transfer event
+ERC20_ABI = [
+    {
+        "anonymous": False,
+        "inputs": [
+            {"indexed": True, "name": "from", "type": "address"},
+            {"indexed": True, "name": "to", "type": "address"},
+            {"indexed": False, "name": "value", "type": "uint256"},
+        ],
+        "name": "Transfer",
+        "type": "event",
+    }
+]
+
+# USDT contract address on BSC
+USDT_ADDRESS = "0x55d398326f99059fF775485246999027B3197955"
 
 async def main():
     # Setup
@@ -96,12 +233,8 @@ async def main():
     # Create listener
     listener = create_websocket_listener(rpc_url, logger=logger)
 
-    # Get contract details
-    usdt_address = get_contract_address("USDT_BSC")
-    erc20_abi = get_contract_abi("ERC20")
-
     # Add ABI-based filter (auto-decodes logs!)
-    listener.add_abi_log_filter(abi=erc20_abi, address=usdt_address, event_name="Transfer")
+    listener.add_abi_log_filter(abi=ERC20_ABI, address=USDT_ADDRESS, event_name="Transfer")
 
     # Register handlers
     listener.on("block", create_block_handler())
@@ -192,7 +325,22 @@ Chain Sniper supports easy event filtering using contract ABIs instead of topic 
 from chain_sniper.listener.websocket_listener import WebSocketListener
 from chain_sniper.listener.common import BlockDetail
 
+# Custom ERC20 ABI
+ERC20_ABI = [
+    {
+        "anonymous": False,
+        "inputs": [
+            {"indexed": True, "name": "from", "type": "address"},
+            {"indexed": True, "name": "to", "type": "address"},
+            {"indexed": False, "name": "value", "type": "uint256"},
+        ],
+        "name": "Transfer",
+        "type": "event",
+    }
+]
+
 listener = WebSocketListener("wss://your-rpc-url", block_detail=BlockDetail.FULL_BLOCK)
+listener.add_abi_log_filter(abi=ERC20_ABI, address="0x...", event_name="Transfer")
 ```
 
 Or using the modular utilities:
@@ -201,6 +349,7 @@ Or using the modular utilities:
 from chain_sniper.utils import create_websocket_listener
 
 listener = create_websocket_listener("wss://your-rpc-url", block_detail="full_block")
+listener.add_abi_log_filter(abi=ERC20_ABI, address="0x...", event_name="Transfer")
 ```
 
 ### Using Topic Hashes (Raw Logs)

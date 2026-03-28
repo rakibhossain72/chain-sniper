@@ -9,7 +9,23 @@ from chain_sniper.utils.handlers import (
     create_log_handler,
     create_error_handler,
 )
-from chain_sniper.contracts import get_contract_abi, get_contract_address
+
+# Custom ERC20 ABI for Transfer event
+ERC20_ABI = [
+    {
+        "anonymous": False,
+        "inputs": [
+            {"indexed": True, "name": "from", "type": "address"},
+            {"indexed": True, "name": "to", "type": "address"},
+            {"indexed": False, "name": "value", "type": "uint256"},
+        ],
+        "name": "Transfer",
+        "type": "event",
+    }
+]
+
+# USDT contract address on BSC
+USDT_ADDRESS = "0x55d398326f99059fF775485246999027B3197955"
 
 
 async def main() -> None:
@@ -25,18 +41,14 @@ async def main() -> None:
         poll_interval=2.0,
     )
 
-    # Get contract details from registry
-    usdt_address = get_contract_address("USDT_BSC", "mainnet")
-    erc20_abi = get_contract_abi("ERC20")
-
     # Add ABI-based log filter - automatically decodes logs!
     listener.add_abi_log_filter(
-        abi=erc20_abi, address=usdt_address, event_name="Transfer"
+        abi=ERC20_ABI, address=USDT_ADDRESS, event_name="Transfer"
     )
 
     # Alternative: Add filter using topic hash (returns raw logs)
     # listener.add_abi_log_filter(
-    #     address=usdt_address,
+    #     address=USDT_ADDRESS,
     #     topics=["0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"]
     # )
 

@@ -4,12 +4,11 @@ ChainSniper - Simple blockchain event monitoring.
 A builder-pattern API for watching blockchain events with automatic decoding.
 """
 
-import asyncio
 from typing import Any, Optional, Union, List
 from chain_sniper.listener.websocket_listener import WebSocketListener
 from chain_sniper.listener.poll_listener import HttpListener
 from chain_sniper.filters.dynamic_filter import DynamicFilter
-from chain_sniper.types import EventCallback, BlockCallback, ErrorCallback, FilterFn
+from chain_sniper.types import EventCallback, BlockCallback, ErrorCallback
 
 
 class ChainSniper:
@@ -25,7 +24,7 @@ class ChainSniper:
         await sniper.start()
     """
 
-    def __init__(self, rpc_url: str):
+    def __init__(self, rpc_url: str) -> None:
         """
         Initialize ChainSniper with RPC URL.
 
@@ -76,7 +75,11 @@ class ChainSniper:
 
         return self
 
-    def filter(self, filter_obj: Optional[Any] = None, **rules) -> "ChainSniper":
+    def filter(
+        self,
+        filter_obj: Optional[Any] = None,
+        **rules
+    ) -> "ChainSniper":
         """
         Add filtering logic.
 

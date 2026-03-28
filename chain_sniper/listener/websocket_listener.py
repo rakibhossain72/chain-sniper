@@ -121,7 +121,7 @@ class WebSocketListener:
             return
 
         if abi is None or event_name is None:
-            raise ValueError("Either provide topics or both abi and event_name")
+            raise ValueError("Provide topics or both abi, event_name")
 
         # Register with ABI filter registry for decoding
         generated_topics = self._abi_filter.register_abi_filter(

@@ -1,8 +1,9 @@
 """
 Shared ABI filtering and decoding logic for listeners.
 """
-
+import json
 from typing import List, Dict, Any, Optional, Tuple
+from web3 import Web3
 from chain_sniper.parser.log_decoder import LogDecoder
 
 
@@ -38,16 +39,14 @@ class ABIFilterRegistry:
         Returns:
             Generated topics if event_name provided, None otherwise
         """
+        # Parse ABI if it's a JSON string
         if isinstance(abi, str):
-            import json
-
             abi = json.loads(abi)
 
         generated_topics = None
 
         if event_name and not topics:
             # Generate topics from ABI + event_name
-            from web3 import Web3
 
             w3 = Web3()
             contract = w3.eth.contract(abi=abi)
