@@ -2,7 +2,7 @@
 
 ⚡ **Simple blockchain event monitoring with automatic decoding**
 
-Monitor ERC20 transfers, NFT mints, and any smart contract events with just a few lines of code. Chain Sniper automatically decodes events using contract ABIs and provides a clean, builder-pattern API.
+Monitor ERC20 transfers, NFT mints, and any smart contract events with just a few lines of code. Chain Sniper automatically decodes events using contract ABIs and provides a clean, decorator-based API.
 
 ## Quick Start
 
@@ -25,12 +25,15 @@ ERC20_ABI = [
     }
 ]
 
+# USDT contract address on BSC
+USDT = "0x55d398326f99059fF775485246999027B3197955"
+
 # Monitor USDT transfers on BSC
-sniper = (
-    ChainSniper("wss://bsc-ws-node.nariox.org:443")
-    .watch(abi=ERC20_ABI, address="0x55d398326f99059fF775485246999027B3197955", event="Transfer")
-    .on_event(lambda log: print(f"Transfer: {log['args']['value']/10**18} USDT"))
-)
+sniper = ChainSniper("wss://bsc-ws-node.nariox.org:443")
+
+@sniper.event(contract=USDT, abi=ERC20_ABI, name="Transfer")
+async def handle_transfer(event):
+    print(f"Transfer: {event['args']['value']/10**18} USDT")
 
 await sniper.start()
 ```
@@ -44,22 +47,26 @@ from chain_sniper import ChainSniper, DynamicFilter
 filter = DynamicFilter()
 filter.add_log_rule({"args.value": {"_op": "$gte", "_value": 1000000000000000000000}})  # 1000 * 10^18
 
-sniper = (
-    ChainSniper("wss://bsc-ws-node.nariox.org:443")
-    .watch(abi=ERC20_ABI, address="0x55d398326f99059fF775485246999027B3197955", event="Transfer")
-    .filter(filter)
-    .on_event(lambda log: print(f"Big transfer: {log['args']['value']/10**18} USDT"))
-)
+sniper = ChainSniper("wss://bsc-ws-node.nariox.org:443")
+sniper.filter(filter)
+
+@sniper.event(contract=USDT, abi=ERC20_ABI, name="Transfer")
+async def handle_transfer(event):
+    print(f"Big transfer: {event['args']['value']/10**18} USDT")
+
+await sniper.start()
 ```
 
 ### HTTP Polling (for nodes without WebSocket)
 
 ```python
-sniper = (
-    ChainSniper("https://bsc-dataseed.binance.org/")  # HTTP URL = auto HTTP polling
-    .watch(abi=ERC20_ABI, address="0x...", event="Transfer")
-    .on_event(handler)
-)
+sniper = ChainSniper("https://bsc-dataseed.binance.org/")  # HTTP URL = auto HTTP polling
+
+@sniper.event(contract=USDT, abi=ERC20_ABI, name="Transfer")
+async def handle_transfer(event):
+    print(f"Transfer: {event['args']['value']/10**18} USDT")
+
+await sniper.start()
 ```
 
 ## Project Structure
@@ -119,7 +126,7 @@ pip install -r pyproject.toml
 
 ### ChainSniper
 
-Builder-pattern API for blockchain monitoring.
+Decorator-based API for blockchain monitoring.
 
 ```python
 from chain_sniper import ChainSniper, DynamicFilter
@@ -139,30 +146,33 @@ ERC20_ABI = [
 ]
 
 # Basic usage
-sniper = (
-    ChainSniper("wss://your-rpc")
-    .watch(abi=ERC20_ABI, address="0x...", event="Transfer")
-    .on_event(lambda log: print(log["args"]))
-)
+sniper = ChainSniper("wss://your-rpc")
+
+@sniper.event(contract="0x...", abi=ERC20_ABI, name="Transfer")
+async def handle_transfer(event):
+    print(event["args"])
+
 await sniper.start()
 
 # With filtering
 filter = DynamicFilter()
 filter.add_log_rule({"args.value": {"_op": "$gte", "_value": 1000000}})
 
-sniper = (
-    ChainSniper("https://your-rpc")  # Auto-detects HTTP polling
-    .watch(abi=ERC20_ABI, address="0x...", event="Transfer")
-    .filter(filter)
-    .on_event(your_handler)
-)
+sniper = ChainSniper("https://your-rpc")  # Auto-detects HTTP polling
+sniper.filter(filter)
+
+@sniper.event(contract="0x...", abi=ERC20_ABI, name="Transfer")
+async def handle_transfer(event):
+    print(event["args"])
+
+await sniper.start()
 ```
 
 #### Constructor
 - `ChainSniper(rpc_url: str)` - WebSocket or HTTP RPC URL
 
 #### Methods
-- `.watch(abi, address, event, topics)` - Watch contract events
+- `.event(contract, abi, name, topics)` - Decorator for registering event handlers
 - `.filter(filter_obj, **rules)` - Add filtering logic
 - `.on_event(callback)` - Handle decoded log events
 - `.on_block(callback)` - Handle new blocks
@@ -203,10 +213,8 @@ Chain Sniper now includes reusable modules for common tasks:
 
 ```python
 import asyncio
-from chain_sniper.utils import (
-    get_rpc_url, setup_logging, create_websocket_listener,
-    create_block_handler, create_log_handler, create_error_handler, run_listener
-)
+from chain_sniper.utils import get_rpc_url, setup_logging
+from chain_sniper import ChainSniper
 
 # Custom ERC20 ABI for Transfer event
 ERC20_ABI = [
@@ -223,26 +231,29 @@ ERC20_ABI = [
 ]
 
 # USDT contract address on BSC
-USDT_ADDRESS = "0x55d398326f99059fF775485246999027B3197955"
+USDT = "0x55d398326f99059fF775485246999027B3197955"
 
 async def main():
     # Setup
     rpc_url = get_rpc_url()
     logger = setup_logging()
 
-    # Create listener
-    listener = create_websocket_listener(rpc_url, logger=logger)
+    # Create sniper
+    sniper = ChainSniper(rpc_url)
 
-    # Add ABI-based filter (auto-decodes logs!)
-    listener.add_abi_log_filter(abi=ERC20_ABI, address=USDT_ADDRESS, event_name="Transfer")
+    @sniper.event(contract=USDT, abi=ERC20_ABI, name="Transfer")
+    async def transfer_handler(event):
+        args = event["args"]
+        amount = args["value"] / 10**18
+        print(f"USDT Transfer: {args['from']} → {args['to']}: {amount:.2f} USDT")
 
-    # Register handlers
-    listener.on("block", create_block_handler())
-    listener.on("log", create_log_handler())
-    listener.on("error", create_error_handler())
+    # Register error handler
+    @sniper.on_error
+    async def error_handler(error):
+        logger.error(f"Error: {error}")
 
     # Run with proper error handling
-    await run_listener(listener)
+    await sniper.start()
 
 asyncio.run(main())
 ```
@@ -250,8 +261,8 @@ asyncio.run(main())
 #### HTTP Polling Version
 
 ```python
-# Same code, just change the listener type
-listener = create_http_listener(rpc_url, logger=logger, poll_interval=2.0)
+# Same code, just change the RPC URL to HTTP
+sniper = ChainSniper("https://your-rpc-url")  # Auto-detects HTTP polling
 ```
 
 ## Quick Start
@@ -322,8 +333,7 @@ Chain Sniper supports easy event filtering using contract ABIs instead of topic 
 ### Using ABI and Event Name (Recommended)
 
 ```python
-from chain_sniper.listener.websocket_listener import WebSocketListener
-from chain_sniper.listener.common import BlockDetail
+from chain_sniper import ChainSniper
 
 # Custom ERC20 ABI
 ERC20_ABI = [
@@ -339,17 +349,13 @@ ERC20_ABI = [
     }
 ]
 
-listener = WebSocketListener("wss://your-rpc-url", block_detail=BlockDetail.FULL_BLOCK)
-listener.add_abi_log_filter(abi=ERC20_ABI, address="0x...", event_name="Transfer")
-```
+sniper = ChainSniper("wss://your-rpc-url")
 
-Or using the modular utilities:
+@sniper.event(contract="0x...", abi=ERC20_ABI, name="Transfer")
+async def handle_transfer(event):
+    print(event["args"])
 
-```python
-from chain_sniper.utils import create_websocket_listener
-
-listener = create_websocket_listener("wss://your-rpc-url", block_detail="full_block")
-listener.add_abi_log_filter(abi=ERC20_ABI, address="0x...", event_name="Transfer")
+await sniper.start()
 ```
 
 ### Using Topic Hashes (Raw Logs)
@@ -357,17 +363,18 @@ listener.add_abi_log_filter(abi=ERC20_ABI, address="0x...", event_name="Transfer
 For cases where you prefer raw logs or don't have the ABI:
 
 ```python
-listener.add_abi_log_filter(
-    address="0x...",
+sniper = ChainSniper("wss://your-rpc-url")
+
+@sniper.event(
+    contract="0x...",
     topics=["0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"]
 )
-
-# Logs remain raw (not decoded)
-@listener.on("log")
 async def on_raw_log(log):
     data = log.get("data", "0x")
     amount = int(data[-64:], 16) / (10 ** 18)
     print(f"Raw transfer amount: {amount}")
+
+await sniper.start()
 ```
 
 ## Updating Dynamic Rules

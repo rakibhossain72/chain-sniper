@@ -16,7 +16,7 @@ logger = logging.getLogger("BNB-Watch")
 # ==============================
 # CONFIGURATION
 # ==============================
-RPC_HTTP = "https://bsc-dataseed.binance.org/"  # HttpListener needs HTTP, not WS
+RPC_HTTP = "https://bsc-dataseed.binance.org/"  # needs HTTP, not WS
 
 
 async def main():
@@ -31,7 +31,9 @@ async def main():
             block_number = int(block_header["number"], 16)
             logger.info("New block: %d", block_number)
         except Exception as e:
-            logger.error("Crashed while processing block → %s", e, exc_info=True)
+            logger.error(
+                "Crashed while processing block → %s", e, exc_info=True
+                )
 
     async def handle_error(exc: Exception) -> None:
         logger.error("Listener error → %s", exc)
@@ -55,5 +57,5 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         print("\nStopped by user.")
-    except Exception as e:
+    except Exception:
         logger.critical("Main loop fatal error", exc_info=True)

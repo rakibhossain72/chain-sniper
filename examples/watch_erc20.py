@@ -3,12 +3,7 @@ import asyncio
 # Using the new modular utilities
 from chain_sniper.utils.config import get_rpc_url
 from chain_sniper.utils.logging import setup_logging
-from chain_sniper.utils.runner import create_websocket_listener, run_listener
-from chain_sniper.utils.handlers import (
-    create_block_handler,
-    create_log_handler,
-    create_error_handler,
-)
+from chain_sniper import ChainSniper
 
 # Custom ERC20 ABI for Transfer event
 ERC20_ABI = [
@@ -25,7 +20,7 @@ ERC20_ABI = [
 ]
 
 # USDT contract address on BSC
-USDT_ADDRESS = "0x55d398326f99059fF775485246999027B3197955"
+USDT = "0x55d398326f99059fF775485246999027B3197955"
 
 
 async def main() -> None:
@@ -33,35 +28,29 @@ async def main() -> None:
     rpc_url = get_rpc_url()
     logger = setup_logging(level="INFO", logger_name="example")
 
-    # Create WebSocket listener using utility function
-    listener = create_websocket_listener(
-        rpc_url=rpc_url,
-        block_detail="full_block",
-        logger=logger,
+    # Create sniper with RPC URL
+    sniper = ChainSniper(rpc_url)
+
+    @sniper.event(
+        contract=USDT,
+        abi=ERC20_ABI,
+        name="Transfer"
     )
+    async def transfer_handler(event):
+        """Handle decoded transfer events."""
+        args = event["args"]
+        amount = args["value"] / 10**18
+        print(
+            f"USDT Transfer: {args['from']} → {args['to']}: {amount:.2f} USDT"
+        )
 
-    # Add ABI-based log filter - automatically decodes logs!
-    listener.add_abi_log_filter(
-        abi=ERC20_ABI, address=USDT_ADDRESS, event_name="Transfer"
-    )
+    # Register error handler
+    @sniper.on_error
+    async def error_handler(error):
+        logger.error(f"Error: {error}")
 
-    # Alternative: Add filter using topic hash (returns raw logs)
-    # listener.add_abi_log_filter(
-    #     address=USDT_ADDRESS,
-    #     topics=["0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"]
-    # )
-
-    # Register event handlers using utility functions
-    listener.on("block", create_block_handler())
-    listener.on("log", create_log_handler())
-    listener.on("error", create_error_handler())
-
-    # Run the listener with proper error handling
-    await run_listener(
-        listener=listener,
-        startup_message="Starting WebSocket listener...",
-        shutdown_message="WebSocket listener stopped.",
-    )
+    print("Starting WebSocket listener... (Ctrl+C to stop)")
+    await sniper.start()
 
 
 if __name__ == "__main__":

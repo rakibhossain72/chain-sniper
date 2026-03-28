@@ -4,7 +4,7 @@ ChainSniper - Simple blockchain event monitoring.
 A builder-pattern API for watching blockchain events with automatic decoding.
 """
 
-from typing import Any, Optional, Union, List
+from typing import Any, Optional, Union, List, Callable
 from chain_sniper.listener.websocket_listener import WebSocketListener
 from chain_sniper.listener.poll_listener import HttpListener
 from chain_sniper.filters.dynamic_filter import DynamicFilter
@@ -16,11 +16,12 @@ class ChainSniper:
     Builder for creating blockchain event listeners.
 
     Example:
-        sniper = (
-            ChainSniper("wss://rpc.example.com")
-            .watch(abi=erc20_abi, address="0x...", event="Transfer")
-            .on_event(lambda log: print(log["args"]))
-        )
+        sniper = ChainSniper("wss://rpc.example.com")
+
+        @sniper.event(contract="0x...", abi=erc20_abi, name="Transfer")
+        async def handle_transfer(event):
+            print(event["args"])
+
         await sniper.start()
     """
 
@@ -39,6 +40,47 @@ class ChainSniper:
         self._error_callbacks: List[ErrorCallback] = []
         self._block_detail = "full_block"
         self._poll_interval = 2.0
+
+    def event(
+        self,
+        contract: Optional[Union[str, List[str]]] = None,
+        abi: Optional[Union[List[dict], str]] = None,
+        name: Optional[str] = None,
+        topics: Optional[List[str]] = None,
+    ) -> Callable[[EventCallback], EventCallback]:
+        """
+        Decorator for registering event handlers.
+
+        Args:
+            contract: Contract address(es) to watch
+            abi: Contract ABI (list or JSON string)
+            name: Event name to filter (e.g., "Transfer")
+            topics: Raw topic hashes (alternative to abi+name)
+
+        Returns:
+            Decorator function
+        """
+        def decorator(callback: EventCallback) -> EventCallback:
+            if not self._listener:
+                self._create_listener()
+
+            if topics:
+                # Raw topics - no decoding
+                self._listener.add_abi_log_filter(
+                    address=contract, topics=topics
+                )
+            elif abi and name:
+                # ABI + event - auto decoding
+                self._listener.add_abi_log_filter(
+                    abi=abi, address=contract, event_name=name
+                )
+            else:
+                raise ValueError("Either provide topics or both abi and name")
+
+            self._event_callbacks.append(callback)
+            return callback
+
+        return decorator
 
     def watch(
         self,
