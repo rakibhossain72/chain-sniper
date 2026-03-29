@@ -3,8 +3,7 @@ ABI utilities for loading and working with contract ABIs.
 """
 
 import json
-import os
-from typing import List, Dict, Any, Union
+from typing import List, Dict, Any
 
 
 def load_abi_from_file(filepath: str) -> List[Dict[str, Any]]:
@@ -72,3 +71,12 @@ def get_function_signature(abi: List[Dict[str, Any]], function_name: str) -> str
             return f"{function_name}({','.join(input_types)})"
 
     raise ValueError(f"Function '{function_name}' not found in ABI")
+
+
+if __name__ == "__main__":
+    # Example usage
+    abi = load_abi_from_file("examples/abis/erc20.json")
+    event_sig = get_event_signature(abi, "Transfer")
+    func_sig = get_function_signature(abi, "transfer")
+    print(f"Event signature: {event_sig}")
+    print(f"Function signature: {func_sig}")

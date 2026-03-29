@@ -7,8 +7,8 @@ Accepts a plain RPC URL (str) or an RPCPool
 """
 
 import time
-from typing import Any, Optional, Union, List, Callable
 import asyncio
+from typing import Any, Optional, Union, List, Callable
 from chain_sniper.listener.websocket_listener import WebSocketListener
 from chain_sniper.listener.poll_listener import HttpListener
 from chain_sniper.listener.common import BlockDetail
@@ -221,6 +221,9 @@ class ChainSniper:
 
         async def wrapped_callback(block: dict) -> None:
             # If block has transactions, filter them
+            if not block:
+                return
+
             transactions = block.get("transactions", [])
             if transactions and isinstance(transactions[0], dict):
                 # Filter transactions before calling callback

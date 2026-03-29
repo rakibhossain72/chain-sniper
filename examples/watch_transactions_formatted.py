@@ -32,7 +32,7 @@ async def main() -> None:
         "https://bsc-dataseed4.binance.org",
         "https://public-bsc-mainnet.fastnode.io",
     ]
-    
+
     pool = await RPCPool.create(rpcs=BSC_RPCS, expected_chain_id=56)
 
     # Create ChainSniper instance
