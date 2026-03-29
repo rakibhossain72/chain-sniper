@@ -1,31 +1,14 @@
 import asyncio
-import json
 import logging
 from typing import Callable, Awaitable, Any
+
 import aiohttp
+
 from chain_sniper.listener.common import BlockDetail, _IdGen
 from chain_sniper.utils.abi_filter import ABIFilterRegistry
 
 
 class HttpListener:
-    """
-    Ethereum HTTP polling listener with:
-      • New-block polling     (header-only *or* full block with transactions)
-      • Log / event polling   (eth_getLogs, filtered by address & topics)
-      • Automatic reconnection with configurable back-off
-      • asyncio-based event-emitter — identical interface to WebSocketListener
-
-    Drop-in replacement for WebSocketListener when a WebSocket endpoint is
-    unavailable.  Both classes share the same public API:
-      - constructor keyword args  (block_detail, reconnect_delay, max_reconnect_delay, logger)
-      - .on(event, callback)
-      - .add_log_filter(address, topics)
-      - await .start()
-      - .stop()
-
-    Events emitted: "block", "log", "error"
-    """
-
     def __init__(
         self,
         rpc_url: str,
@@ -45,75 +28,35 @@ class HttpListener:
 
         self._ids = _IdGen()
         self._running = False
-        self._session: aiohttp.ClientSession | None = (
-            None  # live session, kept for _rpc()
-        )
+        self._session: aiohttp.ClientSession | None = None
 
-        # ── Callbacks ──────────────────────────────────────────────────────
-        # key → list of async callables
         self._listeners: dict[str, list[Callable[..., Awaitable[None]]]] = {
             "block": [],
             "log": [],
             "error": [],
         }
-        # Each entry: {"address": ..., "topics": ..., "filter_id": None}
         self._log_filters: list[dict] = []
-
-        # ABI filter registry for decoding logs
         self._abi_filter = ABIFilterRegistry()
 
-        # ── State ──────────────────────────────────────────────────────────
-        self._last_block_number: int | None = (
-            None  # highest block we've already emitted
-        )
-        self._filter_ids: list[str] = []  # eth_newFilter IDs (if node supports it)
-        self._use_filter_api = True  # flip to False if node rejects eth_newFilter
+        self._last_block_number: int | None = None
+        self._filter_ids: list[str] = []
+        self._use_filter_api = True
 
-    # ──────────────────────────────────────────────────────────────────────
-    # Public API  (identical signatures to WebSocketListener)
-    # ──────────────────────────────────────────────────────────────────────
-
-    def on(self, event: str, callback: Callable[..., Awaitable[None]]) -> Callable:
-        """
-        Register an async callback for *event*.
-
-        Events:
-            "block"  - fired for every new block (dict).
-            "log"    - fired for every matched log / event (dict).
-            "error"  - fired on non-fatal errors (Exception).
-
-        Example::
-
-            @listener.on("block")
-            async def handle_block(block: dict) -> None:
-                print(block["number"])
-        """
+    def on(
+        self,
+        event: str,
+        callback: Callable[..., Awaitable[None]],
+    ) -> Callable:
         if event not in self._listeners:
             self._listeners[event] = []
         self._listeners[event].append(callback)
-        return callback  # allow use as a decorator
+        return callback
 
     def add_log_filter(
         self,
         address: str | list[str] | None = None,
         topics: list[str | list[str] | None] | None = None,
     ) -> None:
-        """
-        Queue a log/event subscription.
-
-        Args:
-            address: Contract address or list of addresses to watch.
-            topics:  EVM topic filter (supports nested OR lists).
-
-        Must be called *before* :meth:`start`.
-
-        Example::
-
-            listener.add_log_filter(
-                address="0xdAC17F958D2ee523a2206206994597C13D831ec7",
-                topics=["0xddf252ad..."],   # Transfer(address,address,uint256)
-            )
-        """
         self._log_filters.append(
             {"address": address, "topics": topics, "filter_id": None}
         )
@@ -125,35 +68,21 @@ class HttpListener:
         event_name: str | None = None,
         topics: list[str | list[str] | None] | None = None,
     ) -> None:
-        """
-        Queue a log/event subscription using ABI/event name or topic hashes.
-
-        Args:
-            abi: Contract ABI as list or JSON string (optional if using topics).
-            address: Contract address or list of addresses to watch.
-            event_name: Name of the event to filter (e.g., "Transfer").
-            topics: EVM topic filter (alternative to abi+event_name).
-
-        When using abi+event_name, logs will be automatically decoded.
-        When using topics, logs will remain raw.
-        """
         if topics is not None:
-            # Use provided topics - no decoding
             self.add_log_filter(address=address, topics=topics)
             return
 
         if abi is None or event_name is None:
-            raise ValueError("Either provide topics or both abi and event_name")
+            raise ValueError(
+                "Either provide topics or both abi and event_name"
+                )
 
-        # Register with ABI filter registry for decoding
         generated_topics = self._abi_filter.register_abi_filter(
             abi=abi, address=address, event_name=event_name
         )
-
         self.add_log_filter(address=address, topics=generated_topics)
 
     async def start(self) -> None:
-        """Connect, subscribe, and run until :meth:`stop` is called."""
         self._running = True
         delay = self.reconnect_delay
 
@@ -161,20 +90,18 @@ class HttpListener:
             try:
                 async with aiohttp.ClientSession() as session:
                     self._session = session
-                    delay = self.reconnect_delay  # reset back-off on successful connect
+                    delay = self.reconnect_delay
 
-                    # Initialise chain state on (re-)connect
-                    self._last_block_number = await self._get_latest_block_number()
+                    block_num = await self._get_latest_block_number()
+                    self._last_block_number = block_num
                     self.logger.info(
                         "Connected to %s  latest_block=%s",
                         self.rpc_url,
                         hex(self._last_block_number),
                     )
 
-                    # Set up log filters (prefer eth_newFilter, fall back to eth_getLogs scan)
                     await self._setup_log_filters()
 
-                    # Main polling loop
                     while self._running:
                         await self._poll_blocks()
                         await self._poll_logs()
@@ -190,32 +117,27 @@ class HttpListener:
                 self._filter_ids.clear()
 
             if self._running:
-                self.logger.info("Reconnecting in %.1fs…", delay)
+                self.logger.info("Reconnecting in %.1fs...", delay)
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, self.max_reconnect_delay)
 
-    def _decode_log(self, log: dict) -> dict:
-        """Decode log using stored ABI if available."""
-        return self._abi_filter.decode_log(log)
-
     def stop(self) -> None:
-        """Signal the listener to stop after the current iteration."""
         self._running = False
         self.logger.info("Listener stop requested.")
 
-    # ──────────────────────────────────────────────────────────────────────
-    # Internal helpers
-    # ──────────────────────────────────────────────────────────────────────
+    def _decode_log(self, log: dict) -> dict:
+        return self._abi_filter.decode_log(log)
 
     async def _emit(self, event: str, payload: Any) -> None:
         for cb in self._listeners.get(event, []):
             try:
                 await cb(payload)
             except Exception as exc:
-                self.logger.exception("Callback raised for event '%s': %s", event, exc)
+                self.logger.exception(
+                    "Callback raised for event '%s': %s", event, exc
+                    )
 
     async def _rpc(self, method: str, params: list) -> Any:
-        """Send a JSON-RPC POST request and return the 'result' field."""
         if self._session is None:
             raise RuntimeError("No active HTTP session")
 
@@ -242,14 +164,11 @@ class HttpListener:
         return int(hex_num, 16)
 
     async def _get_block_by_number(self, block_number: int) -> dict:
-        """Fetch a block by number. Includes full txs iff block_detail == FULL_BLOCK."""
         full_tx = self.block_detail == BlockDetail.FULL_BLOCK
         return await self._rpc(
             "eth_getBlockByNumber",
             [hex(block_number), full_tx],
         )
-
-    # ── Block polling ──────────────────────────────────────────────────────
 
     async def _poll_blocks(self) -> None:
         try:
@@ -270,40 +189,36 @@ class HttpListener:
                     await self._emit("block", block)
                     self.logger.debug("Emitted block %s", hex(block_num))
             except Exception as exc:
-                self.logger.warning("Could not fetch block %s: %s", hex(block_num), exc)
+                self.logger.warning(
+                    "Could not fetch block %s: %s", hex(block_num), exc
+                    )
                 await self._emit("error", exc)
 
         self._last_block_number = latest
 
-    # ── Log polling ────────────────────────────────────────────────────────
-
     async def _setup_log_filters(self) -> None:
-        """
-        Try to install eth_newFilter for each log filter.
-        Falls back to raw eth_getLogs scanning if the node rejects filter creation.
-        """
         self._filter_ids.clear()
         if not self._log_filters:
             return
 
         for flt in self._log_filters:
-            flt["filter_id"] = None  # reset on reconnect
+            flt["filter_id"] = None
 
-        # Probe whether eth_newFilter is supported
         try:
+            first = self._log_filters[0]
             probe_params: dict = {}
-            if self._log_filters[0]["address"]:
-                probe_params["address"] = self._log_filters[0]["address"]
-            if self._log_filters[0]["topics"]:
-                probe_params["topics"] = self._log_filters[0]["topics"]
+            if first["address"]:
+                probe_params["address"] = first["address"]
+            if first["topics"]:
+                probe_params["topics"] = first["topics"]
             probe_params["fromBlock"] = "latest"
+
             filter_id = await self._rpc("eth_newFilter", [probe_params])
-            self._log_filters[0]["filter_id"] = filter_id
+            first["filter_id"] = filter_id
             self._filter_ids.append(filter_id)
             self._use_filter_api = True
             self.logger.info("Using eth_newFilter API for log polling")
 
-            # Install remaining filters
             for flt in self._log_filters[1:]:
                 params: dict = {}
                 if flt["address"]:
@@ -315,13 +230,15 @@ class HttpListener:
                 flt["filter_id"] = fid
                 self._filter_ids.append(fid)
                 self.logger.info(
-                    "Installed eth_newFilter → filter_id=%s  params=%s", fid, params
+                    "Installed eth_newFilter -> filter_id=%s  params=%s",
+                    fid,
+                    params,
                 )
 
         except Exception:
             self._use_filter_api = False
             self.logger.info(
-                "eth_newFilter not supported — falling back to eth_getLogs range scanning"
+                "eth_newFilter not supported -- falling back to eth_getLogs"
             )
 
     async def _poll_logs(self) -> None:
@@ -334,7 +251,6 @@ class HttpListener:
             await self._poll_logs_via_getlogs()
 
     async def _poll_logs_via_filter(self) -> None:
-        """Drain new entries from each eth_newFilter via eth_getFilterChanges."""
         for flt in self._log_filters:
             filter_id = flt.get("filter_id")
             if not filter_id:
@@ -342,32 +258,25 @@ class HttpListener:
             try:
                 logs = await self._rpc("eth_getFilterChanges", [filter_id])
                 for log in logs or []:
-                    decoded_log = self._decode_log(log)
-                    await self._emit("log", decoded_log)
+                    await self._emit("log", self._decode_log(log))
             except Exception as exc:
                 self.logger.warning(
-                    "eth_getFilterChanges failed for filter %s: %s — switching to eth_getLogs",
+                    "eth_getFilterChanges failed for filter %s: %s"
+                    " -- switching to eth_getLogs",
                     filter_id,
                     exc,
                 )
-                # Filter may have expired; switch to fallback method
                 self._use_filter_api = False
-                # Don't emit error for filter expiration, it's expected
                 return
 
     async def _poll_logs_via_getlogs(self) -> None:
-        """
-        Fetch logs via eth_getLogs for the block range we haven't processed yet.
-        Used when the node does not support stateful filters.
-        """
         if self._last_block_number is None:
             return
 
         from_block = hex(self._last_block_number)
-        to_block = "latest"
 
         for flt in self._log_filters:
-            params: dict = {"fromBlock": from_block, "toBlock": to_block}
+            params: dict = {"fromBlock": from_block, "toBlock": "latest"}
             if flt["address"]:
                 params["address"] = flt["address"]
             if flt["topics"]:
@@ -375,8 +284,7 @@ class HttpListener:
             try:
                 logs = await self._rpc("eth_getLogs", [params])
                 for log in logs or []:
-                    decoded_log = self._decode_log(log)
-                    await self._emit("log", decoded_log)
+                    await self._emit("log", self._decode_log(log))
             except Exception as exc:
                 self.logger.error("eth_getLogs failed: %s", exc)
                 await self._emit("error", exc)
