@@ -5,7 +5,7 @@ from chain_sniper.utils.config import get_rpc_url
 from chain_sniper.utils.logging import setup_logging
 from chain_sniper.utils.runner import create_websocket_listener
 from chain_sniper.engine.pipeline import Pipeline
-from chain_sniper.filters.dynamic_filter import DynamicFilter
+from chain_sniper.filters import Filter
 from chain_sniper.listener.redis_rule_listener import RedisRuleListener
 from chain_sniper.abstracts.base_strategy import BaseStrategy
 
@@ -41,7 +41,7 @@ class Strategy(BaseStrategy):
 
 async def main():
     # 1. Initialize the dynamic filter
-    dyn_filter = DynamicFilter()
+    dyn_filter = Filter()
 
     # 2. Add an initial rule (optional)
     # dyn_filter.add_log_rule({"type": "log", "min_amount": 5000})

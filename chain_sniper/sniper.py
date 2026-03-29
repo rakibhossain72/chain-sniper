@@ -11,7 +11,8 @@ from typing import Any, Optional, Union, List, Callable
 import asyncio
 from chain_sniper.listener.websocket_listener import WebSocketListener
 from chain_sniper.listener.poll_listener import HttpListener
-from chain_sniper.filters.dynamic_filter import DynamicFilter
+from chain_sniper.listener.common import BlockDetail
+from chain_sniper.filters import Filter
 from chain_sniper.types import EventCallback, BlockCallback, ErrorCallback
 from chain_sniper.rpc_pool import RPCPool
 
@@ -156,7 +157,7 @@ class ChainSniper:
             ) -> "ChainSniper":
         """Add filtering logic."""
         if filter_obj is None and rules:
-            filter_obj = DynamicFilter()
+            filter_obj = Filter()
             for key, value in rules.items():
                 if key == "tx":
                     for rule in value:
@@ -195,22 +196,76 @@ class ChainSniper:
         self._poll_interval = seconds
         return self
 
+    def _wrap_event_callback(self, callback: EventCallback) -> EventCallback:
+        """Wrap an event callback to apply filters before execution."""
+        if not self._filters:
+            return callback
+
+        async def wrapped_callback(event: dict) -> None:
+            # Apply all filters - event must match at least one
+            for filter_obj in self._filters:
+                try:
+                    if filter_obj.match_log(event):
+                        await callback(event)
+                        return
+                except Exception:
+                    # Log filter error but don't crash
+                    pass
+
+        return wrapped_callback
+
+    def _wrap_block_callback(self, callback: BlockCallback) -> BlockCallback:
+        """Wrap a block callback to apply filters to transactions."""
+        if not self._filters:
+            return callback
+
+        async def wrapped_callback(block: dict) -> None:
+            # If block has transactions, filter them
+            transactions = block.get("transactions", [])
+            if transactions and isinstance(transactions[0], dict):
+                # Filter transactions before calling callback
+                filtered_txs = []
+                for tx in transactions:
+                    for filter_obj in self._filters:
+                        try:
+                            if filter_obj.match(tx):
+                                filtered_txs.append(tx)
+                                break
+                        except Exception:
+                            pass
+
+                # Only call callback if there are matching transactions
+                if filtered_txs:
+                    # Create a copy of block with filtered transactions
+                    filtered_block = {**block, "transactions": filtered_txs}
+                    await callback(filtered_block)
+            else:
+                # No transactions or header-only mode, call callback as-is
+                await callback(block)
+
+        return wrapped_callback
+
     async def start(self) -> None:
         """Start the listener and begin monitoring."""
         if not self._listener:
             self._create_listener()
 
+        # Wrap callbacks with filter logic if filters are present
         for callback in self._event_callbacks:
-            self._listener.on("log", callback)
+            wrapped_callback = self._wrap_event_callback(callback)
+            self._listener.on("log", wrapped_callback)
         for callback in self._block_callbacks:
-            self._listener.on("block", callback)
+            wrapped_callback = self._wrap_block_callback(callback)
+            self._listener.on("block", wrapped_callback)
         for callback in self._error_callbacks:
             self._listener.on("error", callback)
 
         await self._run_with_pool_rotation()
 
     def stop(self) -> None:
-        """Stop the listener (and the pool's health monitor if one is attached)."""
+        """Stop the listener.
+        Also stops the pool's health monitor if one is attached.
+        """
         if self._listener:
             self._listener.stop()
         if self._rpc_pool is not None:
@@ -242,7 +297,7 @@ class ChainSniper:
                 for cb in self._error_callbacks:
                     try:
                         asyncio.get_event_loop().call_soon(
-                            lambda: asyncio.ensure_future(cb(exc))
+                            lambda exc=exc: asyncio.ensure_future(cb(exc))
                         )
                     except Exception:
                         pass
@@ -262,9 +317,11 @@ class ChainSniper:
                 self._create_listener()
                 # Re-register callbacks on the fresh listener.
                 for callback in self._event_callbacks:
-                    self._listener.on("log", callback)
+                    wrapped_callback = self._wrap_event_callback(callback)
+                    self._listener.on("log", wrapped_callback)
                 for callback in self._block_callbacks:
-                    self._listener.on("block", callback)
+                    wrapped_callback = self._wrap_block_callback(callback)
+                    self._listener.on("block", wrapped_callback)
                 for callback in self._error_callbacks:
                     self._listener.on("error", callback)
 
@@ -273,7 +330,6 @@ class ChainSniper:
         url = self._get_rpc_url()
 
         if url.startswith("ws"):
-            from chain_sniper.listener.websocket_listener import BlockDetail
             block_detail_enum = (
                 BlockDetail.FULL_BLOCK if self._block_detail == "full_block"
                 else BlockDetail.HEADER
@@ -282,7 +338,6 @@ class ChainSniper:
                     url, block_detail=block_detail_enum
                 )
         else:
-            from chain_sniper.listener.poll_listener import BlockDetail
             block_detail_enum = (
                 BlockDetail.FULL_BLOCK if self._block_detail == "full_block"
                 else BlockDetail.HEADER

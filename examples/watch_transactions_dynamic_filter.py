@@ -1,109 +1,15 @@
 """
-Example: Watch transactions via ChainSniper with DynamicFilter.
+Example: Watch transactions via ChainSniper with Filter.
 
 This script demonstrates how to monitor blockchain transactions using the
-ChainSniper builder pattern with DynamicFilter for MongoDB-style rule matching.
+ChainSniper builder pattern with Filter for MongoDB-style rule matching.
 """
 
 import asyncio
-from typing import Any
 from chain_sniper import ChainSniper
-from chain_sniper.filters.dynamic_filter import DynamicFilter
+from chain_sniper.filters import Filter
 from chain_sniper.utils.config import get_rpc_url
 from chain_sniper.utils.logging import setup_logging
-
-
-async def handle_block_with_transactions(block: dict[str, Any]) -> None:
-    """
-    Process each new block and extract transactions.
-
-    When block_detail is set to "full_block", the block dict contains
-    a "transactions" list with full transaction objects.
-    """
-    # Handle None or empty blocks gracefully
-    if not block:
-        logger.warning("Received empty block data")
-        return
-
-    try:
-        block_number = int(block["number"], 16)
-        block_hash = block.get("hash", "unknown")
-        transactions = block.get("transactions", [])
-
-        logger.info(
-            "Block #%d | Hash: %s | Transactions: %d",
-            block_number,
-            block_hash[:10] + "...",
-            len(transactions),
-        )
-
-        # Process each transaction in the block
-        for tx in transactions:
-            # Skip if tx is just a hash string (header-only mode)
-            if isinstance(tx, str):
-                continue
-
-            await process_transaction(tx, block_number)
-
-    except Exception as e:
-        logger.error(
-            "Error processing block %s: %s",
-            block.get("number", "unknown"),
-            e,
-            exc_info=True,
-        )
-
-
-async def process_transaction(tx: dict[str, Any], block_number: int) -> None:
-    """
-    Process a single transaction.
-
-    Transaction dict contains:
-        - hash: Transaction hash
-        - from: Sender address
-        - to: Recipient address (None for contract creation)
-        - value: Value transferred in wei (hex string)
-        - input: Transaction data (hex string)
-        - gas: Gas limit (hex string)
-        - gasPrice: Gas price in wei (hex string)
-        - nonce: Sender's transaction count (hex string)
-        - transactionIndex: Position in block (hex string)
-    """
-    tx_hash = tx.get("hash", "unknown")
-    from_addr = tx.get("from", "unknown")
-    to_addr = tx.get("to")  # None for contract creation
-    value_hex = tx.get("value", "0x0")
-    input_data = tx.get("input", "0x")
-
-    # Convert hex value to int
-    value_wei = int(value_hex, 16)
-    value_eth = value_wei / 10**18
-
-    # Determine transaction type
-    if to_addr is None:
-        tx_type = "Contract Creation"
-    elif input_data and input_data != "0x":
-        tx_type = "Contract Call"
-    else:
-        tx_type = "Transfer"
-
-    # Log transaction details
-    logger.info(
-        "  TX: %s | %s | %s -> %s | %.6f ETH",
-        tx_hash[:10] + "...",
-        tx_type,
-        from_addr[:8] + "..." if from_addr != "unknown" else from_addr,
-        (to_addr[:8] + "...") if to_addr else "NEW",
-        value_eth,
-    )
-
-    # Additional details for contract interactions
-    if tx_type == "Contract Call":
-        if len(input_data) > 10:
-            input_preview = input_data[:10] + "..."
-        else:
-            input_preview = input_data
-        logger.info("    Input data: %s", input_preview)
 
 
 async def handle_error(error: Exception) -> None:
@@ -127,13 +33,13 @@ async def main() -> None:
     # Configure to receive full blocks with transaction data
     sniper.block_detail("full_block")
 
-    # Create DynamicFilter with transaction rules
-    tx_filter = DynamicFilter()
+    # Create Filter with transaction rules
+    tx_filter = Filter()
 
     # Example 1: Filter transactions by recipient address
-    # tx_filter.add_tx_rule({
-    #     "to": "0x55d398326f99059fF775485246999027B3197955"
-    # })
+    tx_filter.add_tx_rule({
+        "to": "0x55d398326f99059fF775485246999027B3197955"
+    })
 
     # Example 2: Filter transactions with value >= 0.1 ETH (10^17 wei)
     # tx_filter.add_tx_rule({
@@ -165,14 +71,11 @@ async def main() -> None:
     # Add filter to sniper
     sniper.filter(tx_filter)
 
-    # Register block handler (transactions are inside blocks)
-    sniper.on_block(handle_block_with_transactions)
-
     # Register error handler
     sniper.on_error(handle_error)
 
     logger.info(
-        "Starting transaction watcher with DynamicFilter... (Ctrl+C to stop)"
+        "Starting transaction watcher with Filter... (Ctrl+C to stop)"
     )
     if tx_filter.tx_rules:
         logger.info("Filter rules: %s", tx_filter.tx_rules)

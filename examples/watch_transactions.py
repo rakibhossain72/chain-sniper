@@ -4,13 +4,13 @@ Example: Watch transactions via ChainSniper.
 This script demonstrates how to monitor blockchain transactions using the
 ChainSniper builder pattern with two filtering approaches:
 1. Simple filtering (address and value thresholds)
-2. DynamicFilter with MongoDB-style rule matching
+2. Filter with MongoDB-style rule matching
 """
 
 import asyncio
 from typing import Any
 from chain_sniper import ChainSniper
-from chain_sniper.filters.dynamic_filter import DynamicFilter
+from chain_sniper.filters import Filter
 from chain_sniper.utils.config import get_rpc_url
 from chain_sniper.utils.logging import setup_logging
 
@@ -24,8 +24,8 @@ WATCHED_ADDRESSES = {
 # Simple filtering: Min value threshold (in wei) to filter small txs
 MIN_VALUE_WEI = 0  # Set to e.g., 10**16 (0.01 ETH) to filter small txs
 
-# Dynamic filtering: Enable or disable DynamicFilter
-USE_DYNAMIC_FILTER = False  # Set to True to use DynamicFilter instead
+# Dynamic filtering: Enable or disable Filter
+USE_DYNAMIC_FILTER = False  # Set to True to use Filter instead
 
 
 async def handle_block_with_transactions(block: dict[str, Any]) -> None:
@@ -94,7 +94,7 @@ async def process_transaction(tx: dict[str, Any], block_number: int) -> None:
     value_wei = int(value_hex, 16)
     value_eth = value_wei / 10**18
 
-    # Apply simple filters (only if not using DynamicFilter)
+    # Apply simple filters (only if not using Filter)
     if not USE_DYNAMIC_FILTER:
         if WATCHED_ADDRESSES:
             addr_watched = (
@@ -139,14 +139,14 @@ async def handle_error(error: Exception) -> None:
     logger.error("Listener error: %s", error)
 
 
-def create_dynamic_filter() -> DynamicFilter:
+def create_dynamic_filter() -> Filter:
     """
-    Create and configure a DynamicFilter with example rules.
+    Create and configure a Filter with example rules.
 
     Returns:
-        Configured DynamicFilter instance
+        Configured Filter instance
     """
-    tx_filter = DynamicFilter()
+    tx_filter = Filter()
 
     # Example 1: Filter transactions by recipient address
     # tx_filter.add_tx_rule({
@@ -201,10 +201,10 @@ async def main() -> None:
 
     # Apply filtering strategy
     if USE_DYNAMIC_FILTER:
-        # Use DynamicFilter for MongoDB-style rule matching
+        # Use Filter for MongoDB-style rule matching
         tx_filter = create_dynamic_filter()
         sniper.filter(tx_filter)
-        logger.info("Using DynamicFilter with rules: %s",
+        logger.info("Using Filter with rules: %s",
                     tx_filter.tx_rules if tx_filter.tx_rules else "None")
     else:
         # Use simple filtering (applied in process_transaction)

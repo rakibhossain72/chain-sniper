@@ -41,10 +41,10 @@ await sniper.start()
 ### Advanced Filtering
 
 ```python
-from chain_sniper import ChainSniper, DynamicFilter
+from chain_sniper import ChainSniper, Filter
 
 # Only show transfers > 1000 USDT
-filter = DynamicFilter()
+filter = Filter()
 filter.add_log_rule({"args.value": {"_op": "$gte", "_value": 1000000000000000000000}})  # 1000 * 10^18
 
 sniper = ChainSniper("wss://bsc-ws-node.nariox.org:443")
@@ -76,7 +76,7 @@ Clean, modular architecture focused on simplicity:
 ```text
 chain-sniper/
 ├── chain_sniper/
-│   ├── __init__.py             # Main exports: ChainSniper, DynamicFilter, etc.
+│   ├── __init__.py             # Main exports: ChainSniper, Filter, etc.
 │   ├── sniper.py               # ChainSniper builder class (main API)
 │   ├── types.py                # Type aliases and protocols
 │   ├── listener/               # Event listeners
@@ -90,9 +90,7 @@ chain-sniper/
 │   │   └── rule_parser.py      # MongoDB-style rule matching
 │   ├── filters/                # Event/transaction filtering
 │   │   ├── base.py             # BaseFilter interface
-│   │   ├── dynamic_filter.py   # Advanced rule-based filtering
-│   │   ├── transfer_filter.py  # Simple address filtering
-│   │   └── contract_call_filter.py # Contract-based filtering
+│   │   └── _filter.py          # Versatile rule-based filtering
 │   └── utils/                  # Shared utilities
 │       ├── abi_filter.py       # Shared ABI filtering logic
 │       ├── config.py           # Environment configuration
@@ -129,7 +127,7 @@ pip install -r pyproject.toml
 Decorator-based API for blockchain monitoring.
 
 ```python
-from chain_sniper import ChainSniper, DynamicFilter
+from chain_sniper import ChainSniper, Filter
 
 # Custom ERC20 ABI
 ERC20_ABI = [
@@ -155,7 +153,7 @@ async def handle_transfer(event):
 await sniper.start()
 
 # With filtering
-filter = DynamicFilter()
+filter = Filter()
 filter.add_log_rule({"args.value": {"_op": "$gte", "_value": 1000000}})
 
 sniper = ChainSniper("https://your-rpc")  # Auto-detects HTTP polling
@@ -182,12 +180,12 @@ await sniper.start()
 - `.start()` - Begin monitoring
 - `.stop()` - Stop monitoring
 
-### DynamicFilter
+### Filter
 
 MongoDB-style rule matching with operators like `$gt`, `$gte`, `$in`, `$regex`, etc.
 
 ```python
-filter = DynamicFilter()
+filter = Filter()
 filter.add_log_rule({"args.value": {"_op": "$gte", "_value": 1000000}})
 filter.add_tx_rule({"to": "0x123...", "value": {"_op": "$gt", "_value": 0}})
 ```
@@ -284,7 +282,7 @@ import dotenv
 from chain_sniper.listener.websocket_listener import WebSocketListener
 from chain_sniper.listener.common import BlockDetail
 from chain_sniper.engine.pipeline import Pipeline
-from chain_sniper.filters.dynamic_filter import DynamicFilter
+from chain_sniper.filters import Filter
 from chain_sniper.abstracts.base_strategy import BaseStrategy
 
 dotenv.load_dotenv()
@@ -296,7 +294,7 @@ class MyStrategy(BaseStrategy):
 
 async def main():
     # 1. Initialize filters
-    dyn_filter = DynamicFilter()
+    dyn_filter = Filter()
     
     # 2. Setup the pipeline
     pipeline = Pipeline(filter=dyn_filter, strategy=MyStrategy())

@@ -3,16 +3,22 @@ import json
 import logging
 from typing import Optional
 import redis.asyncio as redis
-from chain_sniper.filters.dynamic_filter import DynamicFilter
+from chain_sniper.filters import Filter
 
 logger = logging.getLogger(__name__)
+
 
 class RedisRuleListener:
     """
     An asynchronous background listener that subscribes to a Redis channel
-    and pushes received rules into the provided DynamicFilter instance.
+    and pushes received rules into the provided Filter instance.
     """
-    def __init__(self, dynamic_filter: DynamicFilter, redis_url: str = "redis://localhost", channel: str = "sniper_rules"):
+    def __init__(
+        self,
+        dynamic_filter: Filter,
+        redis_url: str = "redis://localhost",
+        channel: str = "sniper_rules"
+    ):
         self.dynamic_filter = dynamic_filter
         self.redis_url = redis_url
         self.channel = channel
@@ -25,7 +31,10 @@ class RedisRuleListener:
             self.redis_client = redis.from_url(self.redis_url)
             self.pubsub = self.redis_client.pubsub()
             await self.pubsub.subscribe(self.channel)
-            logger.info(f"Connected to Redis. Listening for new rules on channel '{self.channel}'...")
+            logger.info(
+                f"Connected to Redis. Listening for new rules"
+                f" on channel '{self.channel}'..."
+            )
             
             self._task = asyncio.create_task(self._listen())
         except Exception as e:
@@ -53,12 +62,18 @@ class RedisRuleListener:
                 # remove the "type" key before adding to filter
                 rule_data.pop("type", None)
                 self.dynamic_filter.add_log_rule(rule_data)
-                logger.info(f"Successfully added dynamically log rule from Redis: {rule_data}")
+                logger.info(
+                    f"Successfully added dynamically log rule"
+                    f" from Redis: {rule_data}"
+                )
             elif rule_type == "tx":
                 # remove the "type" key before adding to filter
                 rule_data.pop("type", None)
                 self.dynamic_filter.add_tx_rule(rule_data)
-                logger.info(f"Successfully added dynamically tx rule from Redis: {rule_data}")
+                logger.info(
+                    f"Successfully added dynamically tx rule"
+                    f" from Redis: {rule_data}"
+                )
             else:
                 logger.warning(f"Unknown rule type received: {rule_type}")
         except json.JSONDecodeError:
