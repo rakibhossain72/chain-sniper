@@ -3,7 +3,7 @@ Versatile filter that combines dynamic rules and static target matching.
 """
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 from chain_sniper.filters.base import BaseFilter
 from chain_sniper.parser.rule_parser import RuleMatcher
 
@@ -30,44 +30,35 @@ class Filter(BaseFilter):
 
     Examples:
         # Simple wallet tracking
-        filter = Filter(target_wallet="0x123...")
+        filter = Filter()..add_tx_rule({"to": "0x123..."})
 
         # Contract interaction tracking
-        filter = Filter(target_contract="0x456...")
+        filter = Filter().add_tx_rule({"to": "0x456..."})
 
         # Dynamic rules
         filter = Filter()
         filter.add_tx_rule({"value": {"_op": "$gte", "_value": 10**18}})
 
         # Hybrid: static + dynamic
-        filter = Filter(target_wallet="0x123...")
+        filter = Filter()
+        filter.add_tx_rule({"to": "0x123..."})
         filter.add_tx_rule({"value": {"_op": "$gte", "_value": 10**17}})
     """
 
     def __init__(
         self,
-        target_wallet: Optional[str] = None,
-        target_contract: Optional[str] = None,
         logger: logging.Logger = logging.getLogger(__name__)
     ):
         """
         Initialize the filter.
 
         Args:
-            target_wallet: Optional wallet address to match
-                transactions to (for tracking incoming transfers)
-            target_contract: Optional contract address to match
-                transactions to (for tracking contract interactions)
             logger: Logger instance for error reporting
         """
         # Dynamic filter properties
         self.tx_rules: List[Dict[str, Any]] = []
         self.log_rules: List[Dict[str, Any]] = []
         self.rule_matcher = RuleMatcher(logger=logger)
-
-        # Static filter properties
-        self.target_wallet = target_wallet
-        self.target_contract = target_contract
 
         self.logger = logger
 
@@ -138,14 +129,6 @@ class Filter(BaseFilter):
                 except (ValueError, KeyError) as e:
                     self.logger.error(f"TX rule error {rule}: {e}")
 
-        # Check static target_wallet (for tracking incoming transfers)
-        if self.target_wallet and tx.get("to") == self.target_wallet:
-            return True
-
-        # Check static target_contract (for tracking contract interactions)
-        if self.target_contract and tx.get("to") == self.target_contract:
-            return True
-
         return False
 
     def match_log(self, log: Dict[str, Any]) -> bool:
@@ -194,26 +177,6 @@ class Filter(BaseFilter):
         self.log_rules.clear()
         self.logger.info("Cleared log rules")
 
-    def set_target_wallet(self, target_wallet: Optional[str]):
-        """
-        Set or update the target wallet address.
-
-        Args:
-            target_wallet: Wallet address to match, or None to disable
-        """
-        self.target_wallet = target_wallet
-        self.logger.info(f"Set target wallet: {target_wallet}")
-
-    def set_target_contract(self, target_contract: Optional[str]):
-        """
-        Set or update the target contract address.
-
-        Args:
-            target_contract: Contract address to match, or None to disable
-        """
-        self.target_contract = target_contract
-        self.logger.info(f"Set target contract: {target_contract}")
-
     def get_config(self) -> Dict[str, Any]:
         """
         Get the current filter configuration.
@@ -224,10 +187,5 @@ class Filter(BaseFilter):
         return {
             "tx_rules_count": len(self.tx_rules),
             "log_rules_count": len(self.log_rules),
-            "target_wallet": self.target_wallet,
-            "target_contract": self.target_contract,
             "has_dynamic_rules": bool(self.tx_rules or self.log_rules),
-            "has_static_targets": bool(
-                self.target_wallet or self.target_contract
-            )
         }

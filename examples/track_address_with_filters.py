@@ -67,7 +67,7 @@ async def example_2():
     logger.info("=== Tracking Contract Calls ===")
 
     sniper = await create_sniper()
-    sniper.filter(Filter(target_contract=TRACKED_ADDRESS))
+    sniper.filter(Filter().add_tx_rule({"to": TRACKED_ADDRESS}))
     sniper.block_detail("full_block")
 
     @sniper.on_block
@@ -127,7 +127,7 @@ async def main():
     for num, (name, _) in examples.items():
         print(f"  {num}. {name}")
 
-    choice = "1"  # input("\nEnter number (1-3): ").strip()
+    choice = "2"  # input("\nEnter number (1-3): ").strip()
 
     if choice in examples:
         print(f"\nRunning: {examples[choice][0]}")
