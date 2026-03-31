@@ -67,16 +67,31 @@ class ABIFilterRegistry:
 
             if generated_topics:
                 for topic in generated_topics:
+                    # Convert HexBytes to string if needed
+                    if hasattr(topic, 'hex'):
+                        topic = topic.hex()
+                    elif isinstance(topic, bytes):
+                        topic = topic.hex()
                     if isinstance(topic, str):
                         self._abi_map[(addr_lower, topic)] = abi
             elif topics:
                 # Handle raw topics
                 for topic in topics:
+                    # Convert HexBytes to string if needed
+                    if hasattr(topic, 'hex'):
+                        topic = topic.hex()
+                    elif isinstance(topic, bytes):
+                        topic = topic.hex()
                     if isinstance(topic, str):
                         self._abi_map[(addr_lower, topic)] = abi
                     elif isinstance(topic, list):
                         # Handle nested OR lists
                         for sub_topic in topic:
+                            # Convert HexBytes to string if needed
+                            if hasattr(sub_topic, 'hex'):
+                                sub_topic = sub_topic.hex()
+                            elif isinstance(sub_topic, bytes):
+                                sub_topic = sub_topic.hex()
                             if isinstance(sub_topic, str):
                                 self._abi_map[(addr_lower, sub_topic)] = abi
             else:
@@ -101,6 +116,13 @@ class ABIFilterRegistry:
 
         if topics:
             topic = topics[0]
+            # Convert HexBytes to string if needed
+            if hasattr(topic, 'hex'):
+                topic = topic.hex()
+            elif isinstance(topic, bytes):
+                topic = topic.hex()
+            if not str(topic).startswith("0x"):
+                topic = "0x" + str(topic)
             # Try exact match
             abi = self._abi_map.get((address_lower, topic))
             if abi:

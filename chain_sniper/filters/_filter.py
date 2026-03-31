@@ -3,9 +3,11 @@ Versatile filter that combines dynamic rules and static target matching.
 """
 
 import logging
+import json
 from typing import Any, Dict, List
 from chain_sniper.filters.base import BaseFilter
 from chain_sniper.parser.rule_parser import RuleMatcher
+from chain_sniper.parser.log_decoder import LogDecoder
 
 
 class Filter(BaseFilter):
@@ -60,6 +62,10 @@ class Filter(BaseFilter):
         self.log_rules: List[Dict[str, Any]] = []
         self.rule_matcher = RuleMatcher(logger=logger)
 
+        # Log decoding properties
+        self._log_decoder = LogDecoder()
+        self._abi_map: Dict[str, List[Dict[str, Any]]] = {}
+
         self.logger = logger
 
     def add_tx_rule(self, rule: Dict[str, Any]):
@@ -105,6 +111,23 @@ class Filter(BaseFilter):
         self.logger.info(f"Adding log rule: {rule}")
         self.log_rules.append(rule)
 
+    def add_abi(
+        self, abi: List[Dict[str, Any]] | str, address: str | None = None
+    ):
+        """
+        Register an ABI for log decoding.
+
+        Args:
+            abi: Contract ABI as list or JSON string
+            address: Contract address (optional, for address-specific decoding)
+        """
+        if isinstance(abi, str):
+            abi = json.loads(abi)
+
+        key = address.lower() if address else "*"
+        self._abi_map[key] = abi
+        self.logger.info(f"Registered ABI for address: {address or 'all'}")
+
     def match(self, tx: Dict[str, Any]) -> bool:
         """
         Check if transaction matches any of the filters.
@@ -136,6 +159,7 @@ class Filter(BaseFilter):
         Check if log matches any of the dynamic log rules.
 
         Works with both raw and decoded logs.
+        If ABI is registered, logs will be decoded before matching.
 
         Args:
             log: Log dictionary (may be raw or decoded)
@@ -146,14 +170,49 @@ class Filter(BaseFilter):
         if not self.log_rules:
             return False
 
+        # Decode log if ABI is available
+        decoded_log = self._decode_log(log)
+
         for rule in self.log_rules:
             try:
-                if self.rule_matcher.match_rule(log, rule):
+                if self.rule_matcher.match_rule(decoded_log, rule):
                     return True
             except (ValueError, KeyError) as e:
                 self.logger.error(f"Log rule error {rule}: {e}")
 
         return False
+
+    def _decode_log(self, log: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Decode a log using registered ABIs.
+
+        Args:
+            log: Raw log dictionary
+
+        Returns:
+            Decoded log if ABI found, otherwise original log
+        """
+        address = log.get("address")
+        address_lower = address.lower() if address else None
+        topics = log.get("topics", [])
+
+        if topics:
+            topic = topics[0]
+            # Convert HexBytes to string if needed
+            if hasattr(topic, 'hex'):
+                topic = topic.hex()
+            elif isinstance(topic, bytes):
+                topic = topic.hex()
+            # Try exact address match
+            abi = self._abi_map.get(address_lower)
+            if abi:
+                return self._log_decoder.decode_log(log, abi)
+            # Try wildcard address
+            abi = self._abi_map.get("*")
+            if abi:
+                return self._log_decoder.decode_log(log, abi)
+
+        return log
 
     def clear_rules(self):
         """
@@ -188,4 +247,5 @@ class Filter(BaseFilter):
             "tx_rules_count": len(self.tx_rules),
             "log_rules_count": len(self.log_rules),
             "has_dynamic_rules": bool(self.tx_rules or self.log_rules),
+            "registered_abis": len(self._abi_map),
         }

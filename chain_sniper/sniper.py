@@ -137,8 +137,9 @@ class ChainSniper:
                 self._create_listener()
 
             if topics:
+                # Pass ABI for decoding even when topics are provided
                 self._listener.add_abi_log_filter(
-                        address=contract, topics=topics
+                        abi=abi, address=contract, topics=topics
                     )
             elif abi and name:
                 self._listener.add_abi_log_filter(
@@ -172,7 +173,10 @@ class ChainSniper:
             self._create_listener()
 
         if topics:
-            self._listener.add_abi_log_filter(address=address, topics=topics)
+            # Pass ABI for decoding even when topics are provided
+            self._listener.add_abi_log_filter(
+                abi=abi, address=address, topics=topics
+            )
         elif abi and event:
             self._listener.add_abi_log_filter(
                     abi=abi, address=address, event_name=event

@@ -4,20 +4,11 @@ import asyncio
 from chain_sniper.utils.config import get_rpc_url
 from chain_sniper.utils.logging import setup_logging
 from chain_sniper import ChainSniper
+from chain_sniper.filters import Filter
+from chain_sniper.utils.abis import load_abi_from_file
 
 # Custom ERC20 ABI for Transfer event
-ERC20_ABI = [
-    {
-        "anonymous": False,
-        "inputs": [
-            {"indexed": True, "name": "from", "type": "address"},
-            {"indexed": True, "name": "to", "type": "address"},
-            {"indexed": False, "name": "value", "type": "uint256"},
-        ],
-        "name": "Transfer",
-        "type": "event",
-    }
-]
+ERC20_ABI = load_abi_from_file("examples/abis/erc20.json")
 
 # USDT contract address on BSC
 USDT = "0x55d398326f99059fF775485246999027B3197955"
@@ -29,7 +20,10 @@ async def main() -> None:
     logger = setup_logging(level="INFO", logger_name="example")
 
     # Create sniper with RPC URL
-    sniper = ChainSniper(rpc_url)
+    sniper = ChainSniper(rpc_url, chain_id=56)
+
+    filter = Filter()
+    filter.add_abi(ERC20_ABI, address=USDT)
 
     @sniper.event(
         contract=USDT,
