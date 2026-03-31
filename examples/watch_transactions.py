@@ -41,14 +41,14 @@ async def handle_block_with_transactions(block: dict[str, Any]) -> None:
         return
 
     try:
-        block_number = int(block["number"], 16)
+        block_number = block["number"]
         block_hash = block.get("hash", "unknown")
         transactions = block.get("transactions", [])
 
         logger.info(
             "Block #%d | Hash: %s | Transactions: %d",
             block_number,
-            block_hash[:10] + "...",
+            block_hash[:10],
             len(transactions),
         )
 
@@ -87,11 +87,10 @@ async def process_transaction(tx: dict[str, Any], block_number: int) -> None:
     tx_hash = tx.get("hash", "unknown")
     from_addr = tx.get("from", "unknown")
     to_addr = tx.get("to")  # None for contract creation
-    value_hex = tx.get("value", "0x0")
+    value_wei = tx.get("value", 0)
     input_data = tx.get("input", "0x")
 
     # Convert hex value to int
-    value_wei = int(value_hex, 16)
     value_eth = value_wei / 10**18
 
     # Apply simple filters (only if not using Filter)
@@ -118,7 +117,7 @@ async def process_transaction(tx: dict[str, Any], block_number: int) -> None:
     # Log transaction details
     logger.info(
         "  TX: %s | %s | %s -> %s | %.6f ETH",
-        tx_hash[:10] + "...",
+        tx_hash[:10],
         tx_type,
         from_addr[:8] + "..." if from_addr != "unknown" else from_addr,
         (to_addr[:8] + "...") if to_addr else "NEW",
@@ -128,7 +127,7 @@ async def process_transaction(tx: dict[str, Any], block_number: int) -> None:
     # Additional details for contract interactions
     if tx_type == "Contract Call":
         if len(input_data) > 10:
-            input_preview = input_data[:10] + "..."
+            input_preview = input_data[:10]
         else:
             input_preview = input_data
         logger.info("    Input data: %s", input_preview)

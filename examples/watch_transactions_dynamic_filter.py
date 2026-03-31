@@ -71,6 +71,11 @@ async def main() -> None:
     # Add filter to sniper
     sniper.filter(tx_filter)
 
+    # Register block handler
+    @sniper.on_block
+    async def handle_block(block):
+        logger.info("New block: %d with %d transactions", block.get("number"), len(block.get("transactions")))
+
     # Register error handler
     sniper.on_error(handle_error)
 
