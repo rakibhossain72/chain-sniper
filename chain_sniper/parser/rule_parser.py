@@ -1,6 +1,7 @@
 from typing import Any, Callable
 import re
 import logging
+from web3.datastructures import AttributeDict
 
 
 class RuleMatcher:
@@ -98,7 +99,7 @@ class RuleMatcher:
 
     def match_rule(self, tx: dict, rule: dict) -> bool:
         """
-        Check if a transaction satisfies ALL conditions in a single rule (AND logic).
+        Check if a transaction satisfies ALL conditions in a single rule
         Returns False on missing keys unless strict_mode is enabled.
         """
         for key, condition in rule.items():
@@ -135,14 +136,14 @@ class RuleMatcher:
         return None
 
     @staticmethod
-    def _get_nested(data: dict, key: str) -> Any:
+    def _get_nested(data: AttributeDict, key: str) -> Any:
         """
         Access nested dict values using dot notation.
         e.g. 'meta.source' -> data['meta']['source']
         """
         keys = key.split(".")
         for k in keys:
-            if not isinstance(data, dict):
+            if not isinstance(data, AttributeDict):
                 return None
             data = data.get(k)
         return data

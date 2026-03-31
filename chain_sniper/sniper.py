@@ -8,14 +8,15 @@ Accepts a plain RPC URL (str) or an RPCPool
 
 import time
 import asyncio
+import aiohttp
 from typing import Any, Optional, Union, List, Callable
+from web3.datastructures import AttributeDict
 from chain_sniper.listener.websocket_listener import WebSocketListener
 from chain_sniper.listener.poll_listener import HttpListener
 from chain_sniper.listener.common import BlockDetail
 from chain_sniper.filters import Filter
 from chain_sniper.types import EventCallback, BlockCallback, ErrorCallback
 from chain_sniper.rpc_pool import RPCPool
-import aiohttp
 
 
 class ChainSniper:
@@ -259,7 +260,7 @@ class ChainSniper:
                 return
 
             transactions = block.get("transactions", [])
-            if transactions and isinstance(transactions[0], dict):
+            if transactions and isinstance(transactions[0], AttributeDict):
                 # Filter transactions before calling callback
                 filtered_txs = []
                 for tx in transactions:

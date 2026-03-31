@@ -51,11 +51,11 @@ async def example_1():
             if isinstance(tx, str):
                 continue
             logger.info(
-                f"Block #{int(block['number'], 16)} | "
+                f"Block #{block['number']} | "
                 f"TX: {tx.get('hash', 'unknown')[:10]}... | "
                 f"{tx.get('from', '')[:8]}... → "
                 f"{str(tx.get('to', ''))[:8]}... | "
-                f"{int(tx.get('value', '0'), 16) / 10**18:.6f} BNB"
+                f"{tx.get('value', 0) / 10**18:.6f} BNB"
             )
 
     await sniper.start()
@@ -79,7 +79,7 @@ async def example_2():
                 continue
             input_data = tx.get("input", "0x")
             logger.info(
-                f"Block #{int(block['number'], 16)} | "
+                f"Block #{block['number']} | "
                 f"TX: {tx.get('hash', '')[:10]}... | "
                 f"Called: {tx.get('to', '')[:8]}... | "
                 f"Input: {input_data[:10]}..."
@@ -97,8 +97,8 @@ async def example_3():
 
     f = Filter()
     f.add_tx_rule({"to": TRACKED_ADDRESS})           # To our address
-    f.add_tx_rule({"from": TRACKED_ADDRESS})         # From our address
-    f.add_tx_rule({"value": {"_op": "$gte", "_value": 10**18}})  # ≥ 1 BNB
+    # f.add_tx_rule({"from": TRACKED_ADDRESS})         # From our address
+    # f.add_tx_rule({"value": {"_op": "$gte", "_value": 10**18}})  # ≥ 1 BNB
 
     sniper.filter(f)
     sniper.block_detail("full_block")
@@ -110,7 +110,7 @@ async def example_3():
         for tx in block.get("transactions", []):
             if isinstance(tx, str):
                 continue
-            logger.info(f"Matched TX: {tx.get('hash', '')[:10]}...")
+            logger.info(f"Matched TX: {tx['to']}...")
 
     await sniper.start()
 
@@ -127,7 +127,7 @@ async def main():
     for num, (name, _) in examples.items():
         print(f"  {num}. {name}")
 
-    choice = "2"  # input("\nEnter number (1-3): ").strip()
+    choice = input("\nEnter number (1-3): ").strip()
 
     if choice in examples:
         print(f"\nRunning: {examples[choice][0]}")

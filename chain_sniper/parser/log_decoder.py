@@ -14,7 +14,6 @@ class LogDecoder:
     def __init__(self, w3: Web3 = None) -> None:
         # We can use a disconnected Web3 instance just for decoding logic
         self.w3 = w3 or Web3()
-        # Cache for instantiated contract objects to avoid recreating them for the same ABI
         self._contract_cache = {}
 
     def decode_log(self, log: dict, abi=None) -> dict:
@@ -33,30 +32,25 @@ class LogDecoder:
                 abi_key = str(abi)
 
             if abi_key not in self._contract_cache:
-                # If ABI is passed as a string (JSON out of file), we parse it here
                 if isinstance(abi, str):
                     abi = json.loads(abi)
                 self._contract_cache[abi_key] = self.w3.eth.contract(abi=abi)
 
             contract = self._contract_cache[abi_key]
 
-            # In web3.py, `contract.events` contains all event classes.
-            # We can iterate through the original ABI to find all event definitions.
             event_names = [
-                item.get('name') for item in contract.abi 
+                item.get('name') for item in contract.abi
                 if item.get('type') == 'event' and item.get('name')
             ]
-            
+
             for event_name in event_names:
                 try:
                     event = getattr(contract.events, event_name)()
-                    # process_log attempts to match topic[0] and decodes the event
+                    # process_log attempts to match topic[0]
                     decoded = event.process_log(log)
-                    
-                    # Convert EventData from web3 into a regular python dict for broader compatibility
+
                     return dict(decoded)
                 except Exception:
-                    # process_log raises exceptions if topics don't match, we safely skip to next event
                     continue
 
         except Exception as e:
