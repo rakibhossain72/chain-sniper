@@ -24,6 +24,7 @@ async def main():
         RPC_HTTP,
         block_detail=BlockDetail.FULL_BLOCK,
         poll_interval=3.0,
+        chain_id=56,
     )
 
     async def handle_block(block_header: dict[str, Any]) -> None:

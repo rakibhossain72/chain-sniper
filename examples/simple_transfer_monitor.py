@@ -44,15 +44,13 @@ async def main():
     pool = await RPCPool.create(
         rpcs=[
             "https://bsc-dataseed1.binance.org",
-            "https://binance.llamarpc.com",
             "https://public-bsc-mainnet.fastnode.io",
-            "https://rpc.owlracle.info/bsc/70d38ce1826c4a60bb2a8e05a6c8b20f",
             "https://bsc-dataseed2.ninicoin.io",
             "https://bsc-dataseed2.defibit.io",
         ],
-        expected_chain_id=56,
+        expected_chain_id=BSC_CHAIN_ID,
     )
-    sniper = ChainSniper(pool)
+    sniper = ChainSniper(pool, chain_id=BSC_CHAIN_ID)
 
     @sniper.event(
         contract=USDT,

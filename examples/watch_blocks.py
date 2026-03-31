@@ -31,7 +31,7 @@ async def handle_block(block_header: dict[str, Any]) -> None:
 
 async def main() -> None:
     try:
-        listener = WebSocketListener(RPC_WS)
+        listener = WebSocketListener(RPC_WS, chain_id=56)
         listener.on("block", handle_block)
         await listener.start()
 
