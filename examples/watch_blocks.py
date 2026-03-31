@@ -20,7 +20,8 @@ async def handle_block(block_header: dict[str, Any]) -> None:
     Called for every new block header.
     """
     try:
-        block_number = int(block_header["number"], 16)
+        # Block number is now an int (from web3py)
+        block_number = block_header["number"]
         logger.info("New block: %d", block_number)
     except Exception as e:
         logger.error(

@@ -15,6 +15,7 @@ from chain_sniper.listener.common import BlockDetail
 from chain_sniper.filters import Filter
 from chain_sniper.types import EventCallback, BlockCallback, ErrorCallback
 from chain_sniper.rpc_pool import RPCPool
+import aiohttp
 
 
 class ChainSniper:
@@ -40,12 +41,16 @@ class ChainSniper:
         await sniper.start()
     """
 
-    def __init__(self, rpc: Union[str, "RPCPool"]) -> None:
+    def __init__(
+        self, rpc: Union[str, "RPCPool"], chain_id: int | None = None
+    ) -> None:
         """
         Args:
             rpc: A plain WebSocket / HTTP RPC URL  *or*  an RPCPool instance.
                  When an RPCPool is supplied the pool picks the fastest healthy
                  endpoint automatically and rotates on failures.
+            chain_id: Optional chain ID. If provided, will be used to determine
+                      if POA middleware is needed.
         """
         # Resolve the URL to use for the listener.
         if isinstance(rpc, str):
@@ -63,6 +68,7 @@ class ChainSniper:
         self._error_callbacks: List[ErrorCallback] = []
         self._block_detail = "full_block"
         self._poll_interval = 2.0
+        self._chain_id = chain_id
 
     # ------------------------------------------------------------------ #
     # Pool-aware RPC helpers                                               #
@@ -81,6 +87,30 @@ class ChainSniper:
     def _on_rpc_failure(self, url: str) -> None:
         if self._rpc_pool is not None:
             self._rpc_pool.mark_failed(url)
+
+    async def _fetch_chain_id(self, url: str) -> int:
+        """Fetch chain ID from the RPC endpoint."""
+        # Convert WebSocket URL to HTTP for probing
+        probe_url = url
+        if url.startswith("wss://"):
+            probe_url = "https://" + url[6:]
+        elif url.startswith("ws://"):
+            probe_url = "http://" + url[5:]
+
+        payload = {
+            "jsonrpc": "2.0",
+            "method": "eth_chainId",
+            "params": [],
+            "id": 1,
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                probe_url,
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=5.0),
+            ) as resp:
+                data = await resp.json(content_type=None)
+                return int(data["result"], 16)
 
     # ------------------------------------------------------------------ #
     # Builder API — unchanged from original                                #
@@ -250,6 +280,15 @@ class ChainSniper:
 
     async def start(self) -> None:
         """Start the listener and begin monitoring."""
+        # Fetch chain_id if not provided
+        if self._chain_id is None:
+            if self._rpc_pool is not None:
+                # Use expected_chain_id from the pool
+                self._chain_id = self._rpc_pool.expected_chain_id
+            else:
+                # Fetch chain_id from the RPC endpoint
+                self._chain_id = await self._fetch_chain_id(self.rpc_url)
+
         if not self._listener:
             self._create_listener()
 
@@ -317,6 +356,16 @@ class ChainSniper:
                 # Recreate the listener on the new URL.
                 self.rpc_url = next_url
                 self._listener = None
+                # Re-fetch chain_id if it was None initially
+                if self._chain_id is None:
+                    if self._rpc_pool is not None:
+                        self._chain_id = (
+                            self._rpc_pool.expected_chain_id
+                        )
+                    else:
+                        self._chain_id = await self._fetch_chain_id(
+                            self.rpc_url
+                        )
                 self._create_listener()
                 # Re-register callbacks on the fresh listener.
                 for callback in self._event_callbacks:
@@ -338,7 +387,9 @@ class ChainSniper:
                 else BlockDetail.HEADER
             )
             self._listener = WebSocketListener(
-                    url, block_detail=block_detail_enum
+                    url,
+                    block_detail=block_detail_enum,
+                    chain_id=self._chain_id
                 )
         else:
             block_detail_enum = (
@@ -349,4 +400,5 @@ class ChainSniper:
                 url,
                 block_detail=block_detail_enum,
                 poll_interval=self._poll_interval,
+                chain_id=self._chain_id,
             )

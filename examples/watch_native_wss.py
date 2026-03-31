@@ -1,9 +1,6 @@
 import asyncio
 import logging
 from typing import Any
-from web3 import AsyncWeb3
-from web3.providers.rpc import AsyncHTTPProvider
-from web3.middleware import ExtraDataToPOAMiddleware
 from chain_sniper.listener import WebSocketListener
 
 # ==============================
@@ -19,22 +16,11 @@ logger = logging.getLogger("BNB-Watch")
 # ==============================
 # CONFIGURATION
 # ==============================
-RPC_HTTP = "https://bsc.drpc.org"
-RPC_WS  = "wss://bsc.drpc.org"
+RPC_WS = "wss://bsc.drpc.org"
 
-TARGET_WALLET = AsyncWeb3.to_checksum_address("0x8894E0a0c962CB723c1976a4421c95949bE2D4E3")
+TARGET_WALLET = "0x8894E0a0c962CB723c1976a4421c95949bE2D4E3"
 MIN_AMOUNT_BNB = 0.1  # minimum amount to care about (in BNB)
 
-# ==============================
-# WEB3 CLIENT SETUP
-# ==============================
-w3 = AsyncWeb3(AsyncHTTPProvider(RPC_HTTP))
-# BSC is PoA → needed for extraData handling
-w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
-
-# if not w3.is_connected():
-#     logger.critical("Cannot connect to BSC RPC → exiting")
-#     raise SystemExit(1)
 
 async def handle_block(block_header: dict[str, Any]) -> None:
     """
@@ -42,14 +28,22 @@ async def handle_block(block_header: dict[str, Any]) -> None:
     Looks for direct BNB transfers (value > 0) to the target wallet.
     """
     try:
-        block_number = int(block_header["number"], 16)
+        # Block number is now an int (from web3py)
+        block_number = block_header["number"]
         logger.debug("Processing block %d", block_number)
 
-        block = await w3.eth.get_block(block_number, full_transactions=True)
+        # Block data is already formatted by web3py
+        # Transactions are included if block_detail=BlockDetail.FULL_BLOCK
+        if "transactions" not in block_header:
+            logger.debug(
+                "Block %d → no transactions (header only)",
+                block_number
+            )
+            return
 
         interesting_txs = 0
 
-        for tx in block.transactions:
+        for tx in block_header["transactions"]:
             if tx["to"] is None:
                 continue  # contract creation — skip
 
@@ -59,7 +53,8 @@ async def handle_block(block_header: dict[str, Any]) -> None:
             if tx["value"] == 0:
                 continue  # no BNB sent
 
-            amount_bnb = w3.from_wei(tx["value"], 'ether')
+            # Value is already an int (in wei) from web3py
+            amount_bnb = tx["value"] / 10**18
 
             if amount_bnb < MIN_AMOUNT_BNB:
                 continue
@@ -72,7 +67,7 @@ async def handle_block(block_header: dict[str, Any]) -> None:
             print(f"From        : {tx['from']}")
             print(f"To (target) : {tx['to']}")
             print(f"Amount      : {amount_bnb:,.6f} BNB")
-            print(f"Gas Price   : {w3.from_wei(tx['gasPrice'], 'gwei'):.2f} Gwei")
+            print(f"Gas Price   : {tx['gasPrice'] / 10**9:.2f} Gwei")
             print(f"Gas Limit   : {tx['gas']:,d}")
             print("═" * 70)
 
@@ -84,10 +79,16 @@ async def handle_block(block_header: dict[str, Any]) -> None:
             )
 
         if interesting_txs == 0:
-            logger.debug("Block %d → no interesting BNB transfers", block_number)
+            logger.debug(
+                "Block %d → no interesting BNB transfers",
+                block_number
+            )
 
     except Exception as e:
-        logger.error("Crashed while processing block %s → %s", block_number, e, exc_info=True)
+        logger.error(
+            "Crashed while processing block %s → %s",
+            block_number, e, exc_info=True
+        )
 
 
 async def main():

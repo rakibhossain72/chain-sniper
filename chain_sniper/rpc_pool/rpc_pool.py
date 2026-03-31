@@ -40,7 +40,7 @@ class RPCPool:
     recover automatically.
     """
 
-    def __init__(self, nodes: List[RpcNode]) -> None:
+    def __init__(self, nodes: List[RpcNode], expected_chain_id: int) -> None:
         # Called internally after validation; use RPCPool.create() publicly.
         if not nodes:
             raise RuntimeError(
@@ -49,6 +49,7 @@ class RPCPool:
         self._nodes = nodes
         self._lock = asyncio.Lock()
         self._monitor_task: Optional[asyncio.Task] = None
+        self._expected_chain_id = expected_chain_id
 
     # ------------------------------------------------------------------ #
     # Factory                                                              #
@@ -82,7 +83,7 @@ class RPCPool:
             else:
                 logger.warning("RPC rejected — %s: %s", url, result)
 
-        pool = cls(valid_nodes)
+        pool = cls(valid_nodes, expected_chain_id)
         pool._cooldown_seconds = cooldown_seconds
         pool._health_check_interval = health_check_interval
         pool._monitor_task = asyncio.create_task(pool._health_monitor())
@@ -135,6 +136,11 @@ class RPCPool:
     @property
     def healthy_urls(self) -> List[str]:
         return [n.url for n in self._nodes if n.is_healthy]
+
+    @property
+    def expected_chain_id(self) -> int:
+        """Return the expected chain ID for this pool."""
+        return self._expected_chain_id
 
     # ------------------------------------------------------------------ #
     # Internal helpers                                                     #

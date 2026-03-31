@@ -1,12 +1,13 @@
 import asyncio
-import json
 import logging
 from typing import Callable, Awaitable, Any
 
-import websockets
-from websockets.exceptions import ConnectionClosed
+from web3 import AsyncWeb3
+from web3.providers.persistent import WebSocketProvider
+from web3.datastructures import AttributeDict
+from web3.middleware import ExtraDataToPOAMiddleware
 
-from chain_sniper.listener.common import BlockDetail, _IdGen
+from chain_sniper.listener.common import BlockDetail, needs_poa_middleware
 from chain_sniper.utils.abi_filter import ABIFilterRegistry
 
 
@@ -18,17 +19,18 @@ class WebSocketListener:
         block_detail: BlockDetail = BlockDetail.HEADER,
         reconnect_delay: float = 3.0,
         max_reconnect_delay: float = 60.0,
+        chain_id: int | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self.rpc_url = rpc_url
         self.block_detail = block_detail
         self.reconnect_delay = reconnect_delay
         self.max_reconnect_delay = max_reconnect_delay
+        self.chain_id = chain_id
         self.logger = logger or logging.getLogger("WebSocketListener")
 
-        self._ids = _IdGen()
         self._running = False
-        self._ws = None
+        self._w3: AsyncWeb3 | None = None
 
         self._listeners: dict[str, list[Callable[..., Awaitable[None]]]] = {
             "block": [],
@@ -36,7 +38,6 @@ class WebSocketListener:
             "error": [],
         }
         self._log_filters: list[dict] = []
-        self._sub_map: dict[str, str] = {}
         self._abi_filter = ABIFilterRegistry()
 
     def on(
@@ -80,30 +81,55 @@ class WebSocketListener:
 
         while self._running:
             try:
-                async with websockets.connect(self.rpc_url) as ws:
-                    self._ws = ws
-                    self._sub_map.clear()
+                provider = WebSocketProvider(self.rpc_url)
+                async with AsyncWeb3(provider) as w3:
+                    # Inject POA middleware if the chain needs it
+                    if needs_poa_middleware(self.chain_id):
+                        w3.middleware_onion.inject(
+                            ExtraDataToPOAMiddleware, layer=0
+                        )
+                        self.logger.debug(
+                            "Injected ExtraDataToPOAMiddleware "
+                            "for chain_id=%s",
+                            self.chain_id
+                        )
+                    self._w3 = w3
                     delay = self.reconnect_delay
 
-                    await self._subscribe_heads(ws)
-                    await self._subscribe_logs(ws)
+                    # Subscribe to new block headers
+                    await w3.eth.subscribe("newHeads")
+                    self.logger.info("Subscribed to newHeads")
 
-                    async for raw in ws:
+                    # Subscribe to logs if filters are configured
+                    for flt in self._log_filters:
+                        filter_params = {}
+                        if flt["address"]:
+                            filter_params["address"] = flt["address"]
+                        if flt["topics"]:
+                            filter_params["topics"] = flt["topics"]
+
+                        await w3.eth.subscribe("logs", filter_params)
+                        self.logger.info(
+                            "Subscribed to logs with filter: %s", filter_params
+                        )
+
+                    # Process incoming messages
+                    async for message in w3.socket.process_subscriptions():
                         if not self._running:
                             break
                         try:
-                            await self._dispatch(json.loads(raw))
+                            await self._process_message(message)
                         except Exception as exc:
-                            self.logger.error("Dispatch error: %s", exc)
+                            self.logger.error(
+                                "Message processing error: %s", exc
+                                )
                             await self._emit("error", exc)
 
-            except ConnectionClosed as exc:
-                self.logger.warning("Connection closed: %s", exc)
             except Exception as exc:
                 self.logger.error("Listener error: %s", exc)
                 await self._emit("error", exc)
             finally:
-                self._ws = None
+                self._w3 = None
 
             if self._running:
                 self.logger.info("Reconnecting in %.1fs...", delay)
@@ -124,75 +150,68 @@ class WebSocketListener:
             except Exception as exc:
                 self.logger.exception(
                     "Callback raised for event '%s': %s", event, exc
-                    )
+                )
 
-    async def _rpc(self, ws, method: str, params: list) -> Any:
-        req_id = self._ids.next()
-        await ws.send(
-            json.dumps(
-                {
-                    "jsonrpc": "2.0",
-                    "id": req_id,
-                    "method": method,
-                    "params": params,
-                }
-            )
-        )
-        while True:
-            raw = await ws.recv()
-            msg = json.loads(raw)
-            if msg.get("id") == req_id:
-                if "error" in msg:
-                    raise RuntimeError(f"RPC error: {msg['error']}")
-                return msg["result"]
-            await self._dispatch(msg)
-
-    async def _subscribe_heads(self, ws) -> str:
-        sub_id = await self._rpc(ws, "eth_subscribe", ["newHeads"])
-        self._sub_map[sub_id] = "block"
-        self.logger.info("Subscribed to newHeads  -> sub_id=%s", sub_id)
-        return sub_id
-
-    async def _subscribe_logs(self, ws) -> None:
-        for flt in self._log_filters:
-            params: dict = {}
-            if flt["address"]:
-                params["address"] = flt["address"]
-            if flt["topics"]:
-                params["topics"] = flt["topics"]
-            sub_id = await self._rpc(ws, "eth_subscribe", ["logs", params])
-            self._sub_map[sub_id] = "log"
-            self.logger.info(
-                "Subscribed to logs     -> sub_id=%s  filter=%s",
-                sub_id,
-                params,
-            )
-
-    async def _fetch_full_block(self, ws, block_hash: str) -> dict:
-        return await self._rpc(ws, "eth_getBlockByHash", [block_hash, True])
-
-    async def _dispatch(self, msg: dict) -> None:
-        if "params" not in msg:
+    async def _process_message(self, message: dict) -> None:
+        """Process incoming WebSocket message."""
+        if "result" not in message:
             return
-        sub_id = msg["params"].get("subscription")
-        result = msg["params"].get("result")
-        event = self._sub_map.get(sub_id)
+        result = message["result"]
 
-        if event == "block":
-            if self.block_detail == BlockDetail.FULL_BLOCK and self._ws:
-                block_hash = result.get("hash")
-                if block_hash:
-                    try:
-                        result = await self._fetch_full_block(
-                                self._ws, block_hash
+        # Determine event type based on result structure
+        if isinstance(result, AttributeDict):
+            if "number" in result:
+                # This is a block header
+                if self.block_detail == BlockDetail.FULL_BLOCK and self._w3:
+                    block_hash = result.get("hash")
+                    if block_hash:
+                        # --- RETRY LOGIC ADDED HERE ---
+                        retries = 3
+                        full_block = None
+
+                        for attempt in range(retries):
+                            try:
+                                # Fetch full block with transactions
+                                full_block = await self._w3.eth.get_block(
+                                    block_hash, full_transactions=True
+                                )
+                                break  # Success! Break out of the retry loop
+                            except Exception as exc:
+                                if (
+                                    "not found" in str(exc).lower()
+                                    and attempt < retries - 1
+                                ):
+                                    self.logger.debug(
+                                        "Block %s not found yet, retrying",
+                                        (
+                                            block_hash.hex()
+                                            if isinstance(block_hash, bytes)
+                                            else block_hash
+                                        ),
+                                    )
+                                    await asyncio.sleep(0.5)
+                                else:
+                                    self.logger.warning(
+                                        "Could not fetch full block %s after "
+                                        "%s attempts: %s",
+                                        block_hash,
+                                        attempt + 1,
+                                        exc,
+                                    )
+
+                        # emit if we actually successfully retrieved the block
+                        if full_block:
+                            await self._emit("block", full_block)
+                        else:
+                            self.logger.error(
+                                "Skipping block %s due to fetch failure.",
+                                block_hash
                             )
-                    except Exception as exc:
-                        self.logger.warning(
-                            "Could not fetch full block %s: %s",
-                            block_hash,
-                            exc,
-                        )
-            await self._emit("block", result)
 
-        elif event == "log":
-            await self._emit("log", self._decode_log(result))
+                else:
+                    # If we only need the header, emit it directly
+                    await self._emit("block", result)
+
+            elif "topics" in result and "data" in result:
+                # This is a log
+                await self._emit("log", self._decode_log(result))

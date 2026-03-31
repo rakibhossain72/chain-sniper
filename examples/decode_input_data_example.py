@@ -29,7 +29,7 @@ async def handle_block_with_transactions(block: dict) -> None:
         return
 
     try:
-        block_number = int(block["number"], 16)
+        block_number = block["number"]
         transactions = block.get("transactions", [])
 
         logger.info(
@@ -66,12 +66,12 @@ async def process_transaction(tx: dict, block_number: int) -> None:
     function_name, decoded_args, error_message = tx_parser.decode_input(
         input_data, ERC20_ABI, to_addr
     )
-    if error_message:
-        logger.warning(
-            "From: %s | Decode error: %s",
-            from_addr,
-            error_message,
-        )
+    # if error_message:
+    #     logger.warning(
+    #         "From: %s | Decode error: %s",
+    #         from_addr,
+    #         error_message,
+    #     )
 
     if function_name and function_name == "transfer":
         token_to = decoded_args.get("_to")

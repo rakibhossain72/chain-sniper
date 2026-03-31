@@ -28,12 +28,13 @@ async def main():
 
     async def handle_block(block_header: dict[str, Any]) -> None:
         try:
-            block_number = int(block_header["number"], 16)
+            # Block number is now an int (from web3py)
+            block_number = block_header["number"]
             logger.info("New block: %d", block_number)
         except Exception as e:
             logger.error(
                 "Crashed while processing block → %s", e, exc_info=True
-                )
+            )
 
     async def handle_error(exc: Exception) -> None:
         logger.error("Listener error → %s", exc)

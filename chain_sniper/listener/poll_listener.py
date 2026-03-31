@@ -2,9 +2,11 @@ import asyncio
 import logging
 from typing import Callable, Awaitable, Any
 
-import aiohttp
+from web3 import AsyncWeb3
+from web3.providers.rpc import AsyncHTTPProvider
+from web3.middleware import ExtraDataToPOAMiddleware
 
-from chain_sniper.listener.common import BlockDetail, _IdGen
+from chain_sniper.listener.common import BlockDetail, needs_poa_middleware
 from chain_sniper.utils.abi_filter import ABIFilterRegistry
 
 
@@ -17,6 +19,7 @@ class HttpListener:
         reconnect_delay: float = 3.0,
         max_reconnect_delay: float = 60.0,
         poll_interval: float = 2.0,
+        chain_id: int | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self.rpc_url = rpc_url
@@ -24,11 +27,11 @@ class HttpListener:
         self.reconnect_delay = reconnect_delay
         self.max_reconnect_delay = max_reconnect_delay
         self.poll_interval = poll_interval
+        self.chain_id = chain_id
         self.logger = logger or logging.getLogger("HttpListener")
 
-        self._ids = _IdGen()
         self._running = False
-        self._session: aiohttp.ClientSession | None = None
+        self._w3: AsyncWeb3 | None = None
 
         self._listeners: dict[str, list[Callable[..., Awaitable[None]]]] = {
             "block": [],
@@ -75,7 +78,7 @@ class HttpListener:
         if abi is None or event_name is None:
             raise ValueError(
                 "Either provide topics or both abi and event_name"
-                )
+            )
 
         generated_topics = self._abi_filter.register_abi_filter(
             abi=abi, address=address, event_name=event_name
@@ -88,32 +91,44 @@ class HttpListener:
 
         while self._running:
             try:
-                async with aiohttp.ClientSession() as session:
-                    self._session = session
-                    delay = self.reconnect_delay
-
-                    block_num = await self._get_latest_block_number()
-                    self._last_block_number = block_num
-                    self.logger.info(
-                        "Connected to %s  latest_block=%s",
-                        self.rpc_url,
-                        hex(self._last_block_number),
+                provider = AsyncHTTPProvider(self.rpc_url)
+                self._w3 = AsyncWeb3(provider)
+                
+                # Inject POA middleware if the chain needs it
+                if needs_poa_middleware(self.chain_id):
+                    self._w3.middleware_onion.inject(
+                        ExtraDataToPOAMiddleware, layer=0
                     )
+                    self.logger.debug(
+                        "Injected ExtraDataToPOAMiddleware "
+                        "for chain_id=%s",
+                        self.chain_id
+                    )
+                
+                delay = self.reconnect_delay
 
-                    await self._setup_log_filters()
+                block_num = await self._w3.eth.block_number
+                self._last_block_number = block_num
+                self.logger.info(
+                    "Connected to %s  latest_block=%s",
+                    self.rpc_url,
+                    hex(self._last_block_number),
+                )
 
-                    while self._running:
-                        await self._poll_blocks()
-                        await self._poll_logs()
-                        await asyncio.sleep(self.poll_interval)
+                await self._setup_log_filters()
 
-            except aiohttp.ClientError as exc:
-                self.logger.warning("HTTP connection error: %s", exc)
+                while self._running:
+                    await self._poll_blocks()
+                    await self._poll_logs()
+                    await asyncio.sleep(self.poll_interval)
+
             except Exception as exc:
                 self.logger.error("Listener error: %s", exc)
                 await self._emit("error", exc)
             finally:
-                self._session = None
+                if self._w3:
+                    await self._w3.provider.disconnect()
+                    self._w3 = None
                 self._filter_ids.clear()
 
             if self._running:
@@ -135,39 +150,19 @@ class HttpListener:
             except Exception as exc:
                 self.logger.exception(
                     "Callback raised for event '%s': %s", event, exc
-                    )
-
-    async def _rpc(self, method: str, params: list) -> Any:
-        if self._session is None:
-            raise RuntimeError("No active HTTP session")
-
-        payload = {
-            "jsonrpc": "2.0",
-            "id": self._ids.next(),
-            "method": method,
-            "params": params,
-        }
-        async with self._session.post(
-            self.rpc_url,
-            json=payload,
-            headers={"Content-Type": "application/json"},
-        ) as resp:
-            resp.raise_for_status()
-            msg = await resp.json(content_type=None)
-
-        if "error" in msg:
-            raise RuntimeError(f"RPC error: {msg['error']}")
-        return msg["result"]
+                )
 
     async def _get_latest_block_number(self) -> int:
-        hex_num = await self._rpc("eth_blockNumber", [])
-        return int(hex_num, 16)
+        if self._w3 is None:
+            raise RuntimeError("No active Web3 connection")
+        return await self._w3.eth.block_number
 
     async def _get_block_by_number(self, block_number: int) -> dict:
+        if self._w3 is None:
+            raise RuntimeError("No active Web3 connection")
         full_tx = self.block_detail == BlockDetail.FULL_BLOCK
-        return await self._rpc(
-            "eth_getBlockByNumber",
-            [hex(block_number), full_tx],
+        return await self._w3.eth.get_block(
+            block_number, full_transactions=full_tx
         )
 
     async def _poll_blocks(self) -> None:
@@ -191,7 +186,7 @@ class HttpListener:
             except Exception as exc:
                 self.logger.warning(
                     "Could not fetch block %s: %s", hex(block_num), exc
-                    )
+                )
                 await self._emit("error", exc)
 
         self._last_block_number = latest
@@ -213,7 +208,7 @@ class HttpListener:
                 probe_params["topics"] = first["topics"]
             probe_params["fromBlock"] = "latest"
 
-            filter_id = await self._rpc("eth_newFilter", [probe_params])
+            filter_id = await self._w3.eth.filter(probe_params)
             first["filter_id"] = filter_id
             self._filter_ids.append(filter_id)
             self._use_filter_api = True
@@ -226,7 +221,7 @@ class HttpListener:
                 if flt["topics"]:
                     params["topics"] = flt["topics"]
                 params["fromBlock"] = "latest"
-                fid = await self._rpc("eth_newFilter", [params])
+                fid = await self._w3.eth.filter(params)
                 flt["filter_id"] = fid
                 self._filter_ids.append(fid)
                 self.logger.info(
@@ -256,7 +251,7 @@ class HttpListener:
             if not filter_id:
                 continue
             try:
-                logs = await self._rpc("eth_getFilterChanges", [filter_id])
+                logs = await self._w3.eth.get_filter_changes(filter_id)
                 for log in logs or []:
                     await self._emit("log", self._decode_log(log))
             except Exception as exc:
@@ -273,7 +268,7 @@ class HttpListener:
         if self._last_block_number is None:
             return
 
-        from_block = hex(self._last_block_number)
+        from_block = self._last_block_number
 
         for flt in self._log_filters:
             params: dict = {"fromBlock": from_block, "toBlock": "latest"}
@@ -282,7 +277,7 @@ class HttpListener:
             if flt["topics"]:
                 params["topics"] = flt["topics"]
             try:
-                logs = await self._rpc("eth_getLogs", [params])
+                logs = await self._w3.eth.get_logs(params)
                 for log in logs or []:
                     await self._emit("log", self._decode_log(log))
             except Exception as exc:
