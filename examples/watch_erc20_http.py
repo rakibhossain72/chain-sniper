@@ -29,7 +29,7 @@ async def main() -> None:
     logger = setup_logging(level="INFO", logger_name="example")
 
     # Create sniper with RPC URL (HTTP URL = auto HTTP polling)
-    sniper = ChainSniper(rpc_url)
+    sniper = ChainSniper(rpc_url, chain_id=56)  # chain_id must provide
     sniper.poll_interval(2.0)
 
     @sniper.event(

@@ -93,7 +93,7 @@ class HttpListener:
             try:
                 provider = AsyncHTTPProvider(self.rpc_url)
                 self._w3 = AsyncWeb3(provider)
-                
+
                 # Inject POA middleware if the chain needs it
                 if needs_poa_middleware(self.chain_id):
                     self._w3.middleware_onion.inject(
@@ -104,7 +104,7 @@ class HttpListener:
                         "for chain_id=%s",
                         self.chain_id
                     )
-                
+
                 delay = self.reconnect_delay
 
                 block_num = await self._w3.eth.block_number
@@ -247,7 +247,7 @@ class HttpListener:
 
     async def _poll_logs_via_filter(self) -> None:
         for flt in self._log_filters:
-            filter_id = flt.get("filter_id")
+            filter_id = flt.get("filter_id").filter_id
             if not filter_id:
                 continue
             try:
