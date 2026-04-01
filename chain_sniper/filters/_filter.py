@@ -4,7 +4,9 @@ Versatile filter that combines dynamic rules and static target matching.
 
 import logging
 import json
-from typing import Any, Dict, List
+import threading
+from uuid import uuid4
+from typing import Any, Dict, List, Optional
 from chain_sniper.filters.base import BaseFilter
 from chain_sniper.parser.rule_parser import RuleMatcher
 from chain_sniper.parser.log_decoder import LogDecoder
@@ -15,51 +17,28 @@ class Filter(BaseFilter):
     A versatile filter that combines dynamic rule matching
     with static target matching.
 
-    This filter supports multiple filtering strategies:
-    - Dynamic MongoDB-style rules for transactions and logs
-    - Static target wallet matching (for tracking incoming transfers)
-    - Static target contract matching (for tracking contract interactions)
-    - Combination of all filtering strategies
+    Rules are stored as {"id": str, "rule": dict} entries.
+    Each add_tx_rule / add_log_rule call returns the assigned rule_id
+    so callers can remove the rule later.
 
-    Usage modes:
-    1. Dynamic mode: Use add_tx_rule() and add_log_rule()
-       for MongoDB-style rules
-    2. Static mode: Set target_wallet and/or target_contract
-       in constructor
-    3. Hybrid mode: Combine both dynamic rules and static targets
-    4. Custom mode: Extend this class and override match()
-       or match_log() methods
-
-    Examples:
-        # Simple wallet tracking
-        filter = Filter()..add_tx_rule({"to": "0x123..."})
-
-        # Contract interaction tracking
-        filter = Filter().add_tx_rule({"to": "0x456..."})
-
-        # Dynamic rules
-        filter = Filter()
-        filter.add_tx_rule({"value": {"_op": "$gte", "_value": 10**18}})
-
-        # Hybrid: static + dynamic
-        filter = Filter()
-        filter.add_tx_rule({"to": "0x123..."})
-        filter.add_tx_rule({"value": {"_op": "$gte", "_value": 10**17}})
+    Thread-safe: a threading.Lock guards all mutations and is released
+    before calling RuleMatcher (which may be slow).
     """
 
     def __init__(
         self,
         logger: logging.Logger = logging.getLogger(__name__)
     ):
-        """
-        Initialize the filter.
-
-        Args:
-            logger: Logger instance for error reporting
-        """
-        # Dynamic filter properties
+        # Dynamic filter properties — entries are {"id": str, "rule": dict}
         self.tx_rules: List[Dict[str, Any]] = []
         self.log_rules: List[Dict[str, Any]] = []
+
+        # Maps rule_id -> "tx" | "log" for O(1) type lookup
+        self._rule_index: Dict[str, str] = {}
+
+        # Lock guarding all mutations to tx_rules, log_rules, _rule_index
+        self._lock = threading.Lock()
+
         self.rule_matcher = RuleMatcher(logger=logger)
 
         # Log decoding properties
@@ -68,184 +47,193 @@ class Filter(BaseFilter):
 
         self.logger = logger
 
-    def add_tx_rule(self, rule: Dict[str, Any]):
+    # Rule addition
+
+    def add_tx_rule(self, rule: Dict[str, Any]) -> str:
         """
         Add a transaction rule using MongoDB-style operators.
 
-        Examples:
-            filter.add_tx_rule({
-                "to": "0x123...",
-                "value": {"_op": "$gte", "_value": 1000}
-            })
-            filter.add_tx_rule({
-                "from": {"_op": "$in", "_value": ["0x456...", "0x789..."]}
-            })
+        Returns:
+            rule_id: unique string ID assigned to this rule.
         """
-        self.logger.info(f"Adding TX rule: {rule}")
-        self.tx_rules.append(rule)
+        rule_id = str(uuid4())
+        entry = {"id": rule_id, "rule": rule}
+        with self._lock:
+            self.tx_rules.append(entry)
+            self._rule_index[rule_id] = "tx"
+        self.logger.info(f"Added TX rule id={rule_id}: {rule}")
+        return rule_id
 
-    def add_log_rule(self, rule: Dict[str, Any]):
+    def add_log_rule(self, rule: Dict[str, Any]) -> str:
         """
         Add a log rule using MongoDB-style operators.
 
-        Works with both raw logs and decoded logs.
-        Use dot notation for decoded fields.
-
-        Examples:
-            # Raw log fields
-            filter.add_log_rule({"address": "0x55d3..."})
-            filter.add_log_rule({
-                "topics": {"_op": "$in", "_value": ["0xddf25..."]}
-            })
-
-            # Decoded log fields
-            filter.add_log_rule({"event": "Transfer"})
-            filter.add_log_rule({"args.from": "0x123..."})
-            filter.add_log_rule({
-                "args.value": {"_op": "$gte", "_value": 1000}
-            })
-            filter.add_log_rule({
-                "args.to": {"_op": "$regex", "_value": "^0x"}
-            })
+        Returns:
+            rule_id: unique string ID assigned to this rule.
         """
-        self.logger.info(f"Adding log rule: {rule}")
-        self.log_rules.append(rule)
+        rule_id = str(uuid4())
+        entry = {"id": rule_id, "rule": rule}
+        with self._lock:
+            self.log_rules.append(entry)
+            self._rule_index[rule_id] = "log"
+        self.logger.info(f"Added log rule id={rule_id}: {rule}")
+        return rule_id
 
-    def add_abi(
-        self, abi: List[Dict[str, Any]] | str, address: str | None = None
-    ):
+    # Rule removal
+
+    def remove_rule(self, rule_id: str) -> bool:
         """
-        Register an ABI for log decoding.
+        Remove a rule (TX or log) by its ID.
 
-        Args:
-            abi: Contract ABI as list or JSON string
-            address: Contract address (optional, for address-specific decoding)
+        Returns:
+            True if the rule was found and removed, False otherwise.
         """
-        if isinstance(abi, str):
-            abi = json.loads(abi)
+        with self._lock:
+            rule_type = self._rule_index.get(rule_id)
+            if rule_type is None:
+                self.logger.warning(f"remove_rule: unknown rule_id={rule_id}")
+                return False
+            target_list = (
+                self.tx_rules if rule_type == "tx" else self.log_rules
+            )
+            for i, entry in enumerate(target_list):
+                if entry["id"] == rule_id:
+                    del target_list[i]
+                    del self._rule_index[rule_id]
+                    self.logger.info(f"Removed {rule_type} rule id={rule_id}")
+                    return True
+            # Index pointed to a list that no longer contains the entry
+            del self._rule_index[rule_id]
+            self.logger.warning(
+                f"remove_rule: rule_id={rule_id} in index but not in list"
+            )
+            return False
 
-        key = address.lower() if address else "*"
-        self._abi_map[key] = abi
-        self.logger.info(f"Registered ABI for address: {address or 'all'}")
+    def remove_tx_rule(self, rule_id: str) -> bool:
+        """Convenience wrapper — remove a TX rule by ID."""
+        return self.remove_rule(rule_id)
+
+    def remove_log_rule(self, rule_id: str) -> bool:
+        """Convenience wrapper — remove a log rule by ID."""
+        return self.remove_rule(rule_id)
+
+    def clear_tx_rules(self) -> None:
+        """Remove all TX rules."""
+        with self._lock:
+            tx_ids = [e["id"] for e in self.tx_rules]
+            self.tx_rules.clear()
+            for rid in tx_ids:
+                self._rule_index.pop(rid, None)
+        self.logger.info("Cleared all TX rules")
+
+    def clear_log_rules(self) -> None:
+        """Remove all log rules."""
+        with self._lock:
+            log_ids = [e["id"] for e in self.log_rules]
+            self.log_rules.clear()
+            for rid in log_ids:
+                self._rule_index.pop(rid, None)
+        self.logger.info("Cleared all log rules")
+
+    def clear_rules(self) -> None:
+        """Clear all dynamic rules (both TX and log)."""
+        with self._lock:
+            self.tx_rules.clear()
+            self.log_rules.clear()
+            self._rule_index.clear()
+        self.logger.info("Cleared all dynamic rules")
+
+    # Matching
 
     def match(self, tx: Dict[str, Any]) -> bool:
         """
-        Check if transaction matches any of the filters.
+        Check if transaction matches any TX rule.
 
-        Matches if:
-        - Transaction matches any dynamic TX rule, OR
-        - Transaction's 'to' field matches target_wallet, OR
-        - Transaction's 'to' field matches target_contract
-
-        Args:
-            tx: Transaction dictionary
-
-        Returns:
-            True if transaction matches any filter
+        Takes a snapshot of the rule list under the lock, then releases
+        the lock before calling RuleMatcher.
         """
-        # Check dynamic rules
-        if self.tx_rules:
-            for rule in self.tx_rules:
-                try:
-                    if self.rule_matcher.match_rule(tx, rule):
-                        return True
-                except (ValueError, KeyError) as e:
-                    self.logger.error(f"TX rule error {rule}: {e}")
+        with self._lock:
+            snapshot = list(self.tx_rules)
+
+        for entry in snapshot:
+            try:
+                if self.rule_matcher.match_rule(tx, entry["rule"]):
+                    return True
+            except (ValueError, KeyError) as e:
+                self.logger.error(f"TX rule error id={entry['id']}: {e}")
 
         return False
 
     def match_log(self, log: Dict[str, Any]) -> bool:
         """
-        Check if log matches any of the dynamic log rules.
+        Check if log matches any log rule.
 
-        Works with both raw and decoded logs.
-        If ABI is registered, logs will be decoded before matching.
-
-        Args:
-            log: Log dictionary (may be raw or decoded)
-
-        Returns:
-            True if log matches any dynamic log rule
+        Takes a snapshot of the rule list under the lock, then releases
+        the lock before calling RuleMatcher.
         """
-        if not self.log_rules:
+        with self._lock:
+            snapshot = list(self.log_rules)
+
+        if not snapshot:
             return False
 
-        # Decode log if ABI is available
         decoded_log = self._decode_log(log)
 
-        for rule in self.log_rules:
+        for entry in snapshot:
             try:
-                if self.rule_matcher.match_rule(decoded_log, rule):
+                if self.rule_matcher.match_rule(decoded_log, entry["rule"]):
                     return True
             except (ValueError, KeyError) as e:
-                self.logger.error(f"Log rule error {rule}: {e}")
+                self.logger.error(f"Log rule error id={entry['id']}: {e}")
 
         return False
 
+    # ABI registration
+
+    def add_abi(
+        self, abi: List[Dict[str, Any]] | str, address: Optional[str] = None
+    ):
+        """Register an ABI for log decoding."""
+        if isinstance(abi, str):
+            abi = json.loads(abi)
+        key = address.lower() if address else "*"
+        self._abi_map[key] = abi
+        self.logger.info(f"Registered ABI for address: {address or 'all'}")
+
     def _decode_log(self, log: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Decode a log using registered ABIs.
-
-        Args:
-            log: Raw log dictionary
-
-        Returns:
-            Decoded log if ABI found, otherwise original log
-        """
         address = log.get("address")
         address_lower = address.lower() if address else None
         topics = log.get("topics", [])
 
         if topics:
             topic = topics[0]
-            # Convert HexBytes to string if needed
             if hasattr(topic, 'hex'):
                 topic = topic.hex()
             elif isinstance(topic, bytes):
                 topic = topic.hex()
-            # Try exact address match
             abi = self._abi_map.get(address_lower)
             if abi:
                 return self._log_decoder.decode_log(log, abi)
-            # Try wildcard address
             abi = self._abi_map.get("*")
             if abi:
                 return self._log_decoder.decode_log(log, abi)
 
         return log
 
-    def clear_rules(self):
-        """
-        Clear all dynamic rules (both TX and log rules).
-        """
-        self.tx_rules.clear()
-        self.log_rules.clear()
-        self.logger.info("Cleared all dynamic rules")
-
-    def clear_tx_rules(self):
-        """
-        Clear only transaction rules.
-        """
-        self.tx_rules.clear()
-        self.logger.info("Cleared TX rules")
-
-    def clear_log_rules(self):
-        """
-        Clear only log rules.
-        """
-        self.log_rules.clear()
-        self.logger.info("Cleared log rules")
+    # Config / introspection
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Get the current filter configuration.
-
-        Returns:
-            Dictionary containing current filter settings
-        """
+        """Return the current filter configuration."""
+        with self._lock:
+            tx_count = len(self.tx_rules)
+            log_count = len(self.log_rules)
+            tx_ids = [e["id"] for e in self.tx_rules]
+            log_ids = [e["id"] for e in self.log_rules]
         return {
-            "tx_rules_count": len(self.tx_rules),
-            "log_rules_count": len(self.log_rules),
-            "has_dynamic_rules": bool(self.tx_rules or self.log_rules),
+            "tx_rules_count": tx_count,
+            "log_rules_count": log_count,
+            "has_dynamic_rules": bool(tx_count or log_count),
             "registered_abis": len(self._abi_map),
+            "tx_rule_ids": tx_ids,
+            "log_rule_ids": log_ids,
         }
