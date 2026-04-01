@@ -35,6 +35,7 @@ class HttpListener:
 
         self._listeners: dict[str, list[Callable[..., Awaitable[None]]]] = {
             "block": [],
+            "transaction": [],
             "log": [],
             "error": [],
         }
@@ -183,6 +184,9 @@ class HttpListener:
                 if block:
                     await self._emit("block", block)
                     self.logger.debug("Emitted block %s", hex(block_num))
+                    if self.block_detail == BlockDetail.FULL_BLOCK:
+                        for tx in block.get("transactions", []):
+                            await self._emit("transaction", tx)
             except Exception as exc:
                 self.logger.warning(
                     "Could not fetch block %s: %s", hex(block_num), exc

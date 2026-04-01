@@ -17,6 +17,7 @@ class BlockDetail(str, Enum):
 EventCallback = Callable[[dict], Awaitable[None]]
 BlockCallback = Callable[[dict], Awaitable[None]]
 ErrorCallback = Callable[[Exception], Awaitable[None]]
+TxCallback = Callable[[dict], Awaitable[None]]
 FilterFn = Callable[[dict], bool]
 
 

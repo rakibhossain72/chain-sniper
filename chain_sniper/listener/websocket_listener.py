@@ -34,6 +34,7 @@ class WebSocketListener:
 
         self._listeners: dict[str, list[Callable[..., Awaitable[None]]]] = {
             "block": [],
+            "transaction": [],
             "log": [],
             "error": [],
         }
@@ -202,6 +203,8 @@ class WebSocketListener:
                         # emit if we actually successfully retrieved the block
                         if full_block:
                             await self._emit("block", full_block)
+                            for tx in full_block.get("transactions", []):
+                                await self._emit("transaction", tx)
                         else:
                             self.logger.error(
                                 "Skipping block %s due to fetch failure.",

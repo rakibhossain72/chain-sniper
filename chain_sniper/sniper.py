@@ -15,7 +15,7 @@ from chain_sniper.listener.websocket_listener import WebSocketListener
 from chain_sniper.listener.poll_listener import HttpListener
 from chain_sniper.listener.common import BlockDetail
 from chain_sniper.filters import Filter
-from chain_sniper.types import EventCallback, BlockCallback, ErrorCallback
+from chain_sniper.types import EventCallback, BlockCallback, ErrorCallback, TxCallback
 from chain_sniper.rpc_pool import RPCPool
 
 
@@ -67,6 +67,7 @@ class ChainSniper:
         self._event_callbacks: List[EventCallback] = []
         self._block_callbacks: List[BlockCallback] = []
         self._error_callbacks: List[ErrorCallback] = []
+        self._tx_callbacks: List[TxCallback] = []
         self._block_detail = "full_block"
         self._poll_interval = 2.0
         self._chain_id = chain_id
@@ -221,6 +222,11 @@ class ChainSniper:
         self._error_callbacks.append(callback)
         return self
 
+    def on_transaction(self, callback: TxCallback) -> "ChainSniper":
+        """Register a callback for individual transaction events."""
+        self._tx_callbacks.append(callback)
+        return self
+
     def block_detail(self, detail: str) -> "ChainSniper":
         """Set block detail level: 'header' or 'full_block'."""
         self._block_detail = detail
@@ -283,6 +289,22 @@ class ChainSniper:
 
         return wrapped_callback
 
+    def _wrap_tx_callback(self, callback: TxCallback) -> TxCallback:
+        """Wrap a tx callback to apply Filter.match before invoking it."""
+        if not self._filters:
+            return callback
+
+        async def wrapped_callback(tx: dict) -> None:
+            for filter_obj in self._filters:
+                try:
+                    if filter_obj.match(tx):
+                        await callback(tx)
+                        return
+                except Exception:
+                    pass
+
+        return wrapped_callback
+
     async def start(self) -> None:
         """Start the listener and begin monitoring."""
         # Fetch chain_id if not provided
@@ -306,9 +328,11 @@ class ChainSniper:
             self._listener.on("block", wrapped_callback)
         for callback in self._error_callbacks:
             self._listener.on("error", callback)
+        for callback in self._tx_callbacks:
+            wrapped_callback = self._wrap_tx_callback(callback)
+            self._listener.on("transaction", wrapped_callback)
 
         await self._run_with_pool_rotation()
-
     def stop(self) -> None:
         """Stop the listener.
         Also stops the pool's health monitor if one is attached.
@@ -381,6 +405,9 @@ class ChainSniper:
                     self._listener.on("block", wrapped_callback)
                 for callback in self._error_callbacks:
                     self._listener.on("error", callback)
+                for callback in self._tx_callbacks:
+                    wrapped_callback = self._wrap_tx_callback(callback)
+                    self._listener.on("transaction", wrapped_callback)
 
     def _create_listener(self) -> None:
         """Create the appropriate listener for the current rpc_url."""
