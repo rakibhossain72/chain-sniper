@@ -56,26 +56,60 @@ class RedisRuleListener:
     def _process_message(self, data: bytes):
         try:
             rule_data = json.loads(data)
-            rule_type = rule_data.get("type")
-            
-            if rule_type == "log":
-                # remove the "type" key before adding to filter
-                rule_data.pop("type", None)
-                self.dynamic_filter.add_log_rule(rule_data)
-                logger.info(
-                    f"Successfully added dynamically log rule"
-                    f" from Redis: {rule_data}"
-                )
-            elif rule_type == "tx":
-                # remove the "type" key before adding to filter
-                rule_data.pop("type", None)
-                self.dynamic_filter.add_tx_rule(rule_data)
-                logger.info(
-                    f"Successfully added dynamically tx rule"
-                    f" from Redis: {rule_data}"
-                )
+            action = rule_data.get("action", "add")
+
+            if action == "add":
+                rule_type = rule_data.get("type")
+                if rule_type == "log":
+                    rule_data.pop("type", None)
+                    rule_data.pop("action", None)
+                    rule_id = self.dynamic_filter.add_log_rule(rule_data)
+                    logger.info(
+                        f"Added dynamic log rule from Redis:"
+                        f" rule_id={rule_id} rule={rule_data}"
+                    )
+                elif rule_type == "tx":
+                    rule_data.pop("type", None)
+                    rule_data.pop("action", None)
+                    rule_id = self.dynamic_filter.add_tx_rule(rule_data)
+                    logger.info(
+                        f"Added dynamic tx rule from Redis:"
+                        f" rule_id={rule_id} rule={rule_data}"
+                    )
+                else:
+                    logger.warning(f"Unknown rule type received: {rule_type}")
+
+            elif action == "remove":
+                rule_id = rule_data.get("rule_id")
+                if not rule_id:
+                    logger.warning(
+                        "Redis remove message missing 'rule_id' field"
+                    )
+                    return
+                removed = self.dynamic_filter.remove_rule(rule_id)
+                if not removed:
+                    logger.warning(
+                        f"Redis remove: rule_id={rule_id} not found in filter"
+                    )
+
+            elif action == "clear":
+                rule_type = rule_data.get("rule_type")
+                if rule_type == "tx":
+                    self.dynamic_filter.clear_tx_rules()
+                    logger.info("Cleared all TX rules via Redis message")
+                elif rule_type == "log":
+                    self.dynamic_filter.clear_log_rules()
+                    logger.info("Cleared all log rules via Redis message")
+                else:
+                    logger.warning(
+                        f"Redis clear message has unknown rule_type: {rule_type}"
+                    )
+
             else:
-                logger.warning(f"Unknown rule type received: {rule_type}")
+                logger.warning(
+                    f"Redis rule message has unknown action: {action!r}"
+                )
+
         except json.JSONDecodeError:
             logger.error(f"Failed to decode rule message from Redis: {data}")
         except Exception as e:
