@@ -37,12 +37,14 @@ class HttpListener:
             "block": [],
             "transaction": [],
             "log": [],
+            "reorg": [],
             "error": [],
         }
         self._log_filters: list[dict] = []
         self._abi_filter = ABIFilterRegistry()
 
         self._last_block_number: int | None = None
+        self._last_block_hash: str | None = None
         self._filter_ids: list[str] = []
         self._use_filter_api = True
 
@@ -182,6 +184,30 @@ class HttpListener:
             try:
                 block = await self._get_block_by_number(block_num)
                 if block:
+                    # Reorg detection: compare parentHash to last known hash
+                    if self._last_block_hash is not None:
+                        parent_hash = block.get("parentHash")
+                        if isinstance(parent_hash, bytes):
+                            parent_hash = "0x" + parent_hash.hex()
+                        if parent_hash != self._last_block_hash:
+                            await self._emit("reorg", {
+                                "detected_at_block": block_num,
+                                "expected_parent": self._last_block_hash,
+                                "actual_parent": parent_hash,
+                            })
+                            self.logger.warning(
+                                "Reorg detected at block %s: "
+                                "expected_parent=%s actual_parent=%s",
+                                hex(block_num),
+                                self._last_block_hash,
+                                parent_hash,
+                            )
+
+                    block_hash = block.get("hash")
+                    if isinstance(block_hash, bytes):
+                        block_hash = "0x" + block_hash.hex()
+                    self._last_block_hash = block_hash
+
                     await self._emit("block", block)
                     self.logger.debug("Emitted block %s", hex(block_num))
                     if self.block_detail == BlockDetail.FULL_BLOCK:
@@ -192,6 +218,7 @@ class HttpListener:
                     "Could not fetch block %s: %s", hex(block_num), exc
                 )
                 await self._emit("error", exc)
+                # Do not update _last_block_hash on fetch failure
 
         self._last_block_number = latest
 
