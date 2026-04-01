@@ -15,7 +15,7 @@ from chain_sniper.listener.websocket_listener import WebSocketListener
 from chain_sniper.listener.poll_listener import HttpListener
 from chain_sniper.listener.common import BlockDetail
 from chain_sniper.filters import Filter
-from chain_sniper.types import EventCallback, BlockCallback, ErrorCallback, TxCallback
+from chain_sniper.types import EventCallback, BlockCallback, ErrorCallback, TxCallback, ReorgCallback
 from chain_sniper.rpc_pool import RPCPool
 
 
@@ -68,6 +68,7 @@ class ChainSniper:
         self._block_callbacks: List[BlockCallback] = []
         self._error_callbacks: List[ErrorCallback] = []
         self._tx_callbacks: List[TxCallback] = []
+        self._reorg_callbacks: List[ReorgCallback] = []
         self._block_detail = "full_block"
         self._poll_interval = 2.0
         self._chain_id = chain_id
@@ -227,6 +228,11 @@ class ChainSniper:
         self._tx_callbacks.append(callback)
         return self
 
+    def on_reorg(self, callback: ReorgCallback) -> "ChainSniper":
+        """Register a callback for reorg events (no filter wrapping — always significant)."""
+        self._reorg_callbacks.append(callback)
+        return self
+
     def block_detail(self, detail: str) -> "ChainSniper":
         """Set block detail level: 'header' or 'full_block'."""
         self._block_detail = detail
@@ -331,6 +337,8 @@ class ChainSniper:
         for callback in self._tx_callbacks:
             wrapped_callback = self._wrap_tx_callback(callback)
             self._listener.on("transaction", wrapped_callback)
+        for callback in self._reorg_callbacks:
+            self._listener.on("reorg", callback)
 
         await self._run_with_pool_rotation()
     def stop(self) -> None:
@@ -408,6 +416,8 @@ class ChainSniper:
                 for callback in self._tx_callbacks:
                     wrapped_callback = self._wrap_tx_callback(callback)
                     self._listener.on("transaction", wrapped_callback)
+                for callback in self._reorg_callbacks:
+                    self._listener.on("reorg", callback)
 
     def _create_listener(self) -> None:
         """Create the appropriate listener for the current rpc_url."""
