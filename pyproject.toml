@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "aiofiles>=25.1.0",
     "dotenv>=0.9.9",
     "redis>=7.2.1",
     "web3>=7.14.1",

@@ -30,7 +30,9 @@ class RuleMatcher:
         "$lt": lambda a, b: a < b,
         "$lte": lambda a, b: a <= b,
         # String
-        "$contains": lambda a, b: isinstance(a, str) and str(b).lower() in a.lower(),
+        "$contains": lambda a, b: (
+            isinstance(a, str) and str(b).lower() in a.lower()
+        ),
         "$startswith": lambda a, b: isinstance(a, str)
         and a.lower().startswith(str(b).lower()),
         "$endswith": lambda a, b: isinstance(a, str)
@@ -51,9 +53,15 @@ class RuleMatcher:
     ):
         """
         Args:
-            case_sensitive : If False, string equality checks are case-insensitive (default: False).
-            strict_mode    : If True, raises on missing keys instead of returning False (default: False).
-            logger           : Logger instance for logging messages (default:.getLogger(__name__)).
+            case_sensitive
+                If False, string equality checks are case-insensitive
+                    (default: False).
+            strict_mode
+                If True, raises on missing keys instead of returning False
+                    (default: False).
+            logger
+                Logger instance for logging messages
+                    (default:.getLogger(__name__)).
         """
         self.case_sensitive = case_sensitive
         self.strict_mode = strict_mode
@@ -83,7 +91,8 @@ class RuleMatcher:
                 raise ValueError(f"Condition dict missing '_op': {condition}")
             if op not in self._OPERATORS:
                 raise ValueError(
-                    f"Unsupported operator '{op}'. Supported: {list(self._OPERATORS)}"
+                    f"Unsupported operator '{op}'."
+                    f"Supported: {list(self._OPERATORS)}"
                 )
 
             # Normalize only for string-comparison operators
@@ -94,7 +103,8 @@ class RuleMatcher:
             return self._OPERATORS[op](tx_value, val)
 
         raise ValueError(
-            f"Invalid condition format — expected scalar or dict, got: {type(condition)}"
+            "Invalid condition format — expected scalar or dict, "
+            f"got: {type(condition)}"
         )
 
     def match_rule(self, tx: dict, rule: dict) -> bool:
@@ -108,7 +118,10 @@ class RuleMatcher:
 
             if tx_value is None:
                 # $exists can still validly operate on missing keys
-                if isinstance(condition, dict) and condition.get("_op") == "$exists":
+                if (
+                    isinstance(condition, dict)
+                    and condition.get("_op") == "$exists"
+                ):
                     if not self._evaluate(None, condition):
                         return False
                     continue
@@ -151,6 +164,8 @@ class RuleMatcher:
     def add_operator(self, name: str, fn: Callable) -> None:
         """Register a custom operator at runtime."""
         if not name.startswith("$"):
-            raise ValueError(f"Operator name must start with '$', got: '{name}'")
+            raise ValueError(
+                f"Operator name must start with '$', got: '{name}'"
+            )
         self._OPERATORS[name] = fn
         self.logger.info(f"Custom operator '{name}' registered.")

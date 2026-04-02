@@ -8,6 +8,9 @@ from web3.datastructures import AttributeDict
 from web3.middleware import ExtraDataToPOAMiddleware
 
 from chain_sniper.listener.common import BlockDetail, needs_poa_middleware
+from chain_sniper.parser.block_fetcher import BlockFetcher
+from chain_sniper.parser.block_processor import BlockProcessor
+from chain_sniper.parser.event_dispatcher import EventDispatcher
 from chain_sniper.utils.abi_filter import ABIFilterRegistry
 
 
@@ -21,6 +24,7 @@ class WebSocketListener:
         max_reconnect_delay: float = 60.0,
         chain_id: int | None = None,
         logger: logging.Logger | None = None,
+        HEADER_QUEUE_MAX: int = 256
     ) -> None:
         self.rpc_url = rpc_url
         self.block_detail = block_detail
@@ -28,18 +32,35 @@ class WebSocketListener:
         self.max_reconnect_delay = max_reconnect_delay
         self.chain_id = chain_id
         self.logger = logger or logging.getLogger("WebSocketListener")
+        self.HEADER_QUEUE_MAX = HEADER_QUEUE_MAX
 
         self._running = False
         self._w3: AsyncWeb3 | None = None
 
-        self._listeners: dict[str, list[Callable[..., Awaitable[None]]]] = {
+        self._listeners: dict[
+            str, list[Callable[..., Awaitable[None]]]
+        ] = {
             "block": [],
             "transaction": [],
             "log": [],
+            "reorg": [],
             "error": [],
         }
         self._log_filters: list[dict] = []
         self._abi_filter = ABIFilterRegistry()
+
+        self._subscription_ids: list[str] = []
+
+        self._header_queue: asyncio.Queue = asyncio.Queue(
+            maxsize=self.HEADER_QUEUE_MAX
+        )
+        self._worker_task: asyncio.Task | None = None
+
+        self._block_fetcher: BlockFetcher | None = None
+        self._block_processor: BlockProcessor = BlockProcessor(self.logger)
+        self._dispatcher: EventDispatcher = EventDispatcher(
+            self._listeners, self.logger
+        )
 
     def on(
         self, event: str, callback: Callable[..., Awaitable[None]]
@@ -84,37 +105,48 @@ class WebSocketListener:
             try:
                 provider = WebSocketProvider(self.rpc_url)
                 async with AsyncWeb3(provider) as w3:
-                    # Inject POA middleware if the chain needs it
                     if needs_poa_middleware(self.chain_id):
                         w3.middleware_onion.inject(
                             ExtraDataToPOAMiddleware, layer=0
                         )
                         self.logger.debug(
-                            "Injected ExtraDataToPOAMiddleware "
-                            "for chain_id=%s",
-                            self.chain_id
+                            "Injected ExtraDataToPOAMiddleware, chain_id=%s",
+                            self.chain_id,
                         )
+
                     self._w3 = w3
                     delay = self.reconnect_delay
 
-                    # Subscribe to new block headers
-                    await w3.eth.subscribe("newHeads")
-                    self.logger.info("Subscribed to newHeads")
+                    self._reset_state()
 
-                    # Subscribe to logs if filters are configured
+                    self._block_fetcher = BlockFetcher(w3, self.logger)
+
+                    sub_id = await w3.eth.subscribe("newHeads")
+                    self._subscription_ids.append(str(sub_id))
+                    self.logger.info(
+                        "Subscribed to newHeads (sub_id=%s)", sub_id
+                    )
+
                     for flt in self._log_filters:
-                        filter_params = {}
+                        filter_params: dict = {}
                         if flt["address"]:
                             filter_params["address"] = flt["address"]
                         if flt["topics"]:
                             filter_params["topics"] = flt["topics"]
-
-                        await w3.eth.subscribe("logs", filter_params)
+                        log_sub_id = await w3.eth.subscribe(
+                            "logs", filter_params
+                        )
+                        self._subscription_ids.append(str(log_sub_id))
                         self.logger.info(
-                            "Subscribed to logs with filter: %s", filter_params
+                            "Subscribed to logs (sub_id=%s) filter=%s",
+                            log_sub_id,
+                            filter_params,
                         )
 
-                    # Process incoming messages
+                    self._worker_task = asyncio.create_task(
+                        self._block_worker()
+                    )
+
                     async for message in w3.socket.process_subscriptions():
                         if not self._running:
                             break
@@ -123,17 +155,19 @@ class WebSocketListener:
                         except Exception as exc:
                             self.logger.error(
                                 "Message processing error: %s", exc
-                                )
-                            await self._emit("error", exc)
+                            )
+                            asyncio.create_task(
+                                self._dispatcher.emit("error", exc)
+                            )
 
             except Exception as exc:
                 self.logger.error("Listener error: %s", exc)
-                await self._emit("error", exc)
+                asyncio.create_task(self._dispatcher.emit("error", exc))
             finally:
-                self._w3 = None
+                await self._cleanup()
 
             if self._running:
-                self.logger.info("Reconnecting in %.1fs...", delay)
+                self.logger.info("Reconnecting in %.1fs…", delay)
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, self.max_reconnect_delay)
 
@@ -141,80 +175,100 @@ class WebSocketListener:
         self._running = False
         self.logger.info("Listener stop requested.")
 
+    def _reset_state(self) -> None:
+        while not self._header_queue.empty():
+            try:
+                self._header_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
+        self._subscription_ids.clear()
+        self._block_processor.reset()
+
+    async def _cleanup(self) -> None:
+        if self._worker_task and not self._worker_task.done():
+            self._worker_task.cancel()
+            try:
+                await self._worker_task
+            except asyncio.CancelledError:
+                pass
+        self._worker_task = None
+
+        if self._w3 and self._subscription_ids:
+            for sub_id in self._subscription_ids:
+                try:
+                    await self._w3.eth.unsubscribe(sub_id)
+                except Exception:
+                    pass
+
+        self._w3 = None
+        self._block_fetcher = None
+
+    async def _block_worker(self) -> None:
+        while self._running:
+            try:
+                header = await asyncio.wait_for(
+                    self._header_queue.get(), timeout=1.0
+                )
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                break
+
+            try:
+                block_hash = header.get("hash")
+                if not block_hash:
+                    continue
+
+                if (
+                    self.block_detail == BlockDetail.FULL_BLOCK
+                    and self._block_fetcher
+                ):
+                    block = await self._block_fetcher.fetch_complete(
+                        block_hash
+                    )
+                    if block:
+                        await self._block_processor.process(
+                            block, self._dispatcher.emit
+                        )
+                    else:
+                        self.logger.error(
+                            "Skipping block %s — could not fetch block.",
+                            block_hash,
+                        )
+                else:
+                    asyncio.create_task(self._dispatcher.emit("block", header))
+
+            except Exception as exc:
+                self.logger.error("Block worker error: %s", exc)
+                asyncio.create_task(self._dispatcher.emit("error", exc))
+            finally:
+                self._header_queue.task_done()
+
     def _decode_log(self, log: dict) -> dict:
         return self._abi_filter.decode_log(log)
 
     async def _emit(self, event: str, payload: Any) -> None:
-        for cb in self._listeners.get(event, []):
-            try:
-                await cb(payload)
-            except Exception as exc:
-                self.logger.exception(
-                    "Callback raised for event '%s': %s", event, exc
-                )
+        await self._dispatcher.emit(event, payload)
 
     async def _process_message(self, message: dict) -> None:
-        """Process incoming WebSocket message."""
         if "result" not in message:
             return
         result = message["result"]
 
-        # Determine event type based on result structure
-        if isinstance(result, AttributeDict):
-            if "number" in result:
-                # This is a block header
-                if self.block_detail == BlockDetail.FULL_BLOCK and self._w3:
-                    block_hash = result.get("hash")
-                    if block_hash:
-                        # --- RETRY LOGIC ADDED HERE ---
-                        retries = 3
-                        full_block = None
+        if not isinstance(result, AttributeDict):
+            return
 
-                        for attempt in range(retries):
-                            try:
-                                # Fetch full block with transactions
-                                full_block = await self._w3.eth.get_block(
-                                    block_hash, full_transactions=True
-                                )
-                                break  # Success! Break out of the retry loop
-                            except Exception as exc:
-                                if (
-                                    "not found" in str(exc).lower()
-                                    and attempt < retries - 1
-                                ):
-                                    self.logger.debug(
-                                        "Block %s not found yet, retrying",
-                                        (
-                                            block_hash.hex()
-                                            if isinstance(block_hash, bytes)
-                                            else block_hash
-                                        ),
-                                    )
-                                    await asyncio.sleep(0.5)
-                                else:
-                                    self.logger.warning(
-                                        "Could not fetch full block %s after "
-                                        "%s attempts: %s",
-                                        block_hash,
-                                        attempt + 1,
-                                        exc,
-                                    )
+        if "number" in result:
+            try:
+                self._header_queue.put_nowait(result)
+            except asyncio.QueueFull:
+                self.logger.warning(
+                    "Header queue full — dropping header for block %s. "
+                    "Consider increasing _HEADER_QUEUE_MAX.",
+                    result.get("number"),
+                )
 
-                        # emit if we actually successfully retrieved the block
-                        if full_block:
-                            await self._emit("block", full_block)
-                            for tx in full_block.get("transactions", []):
-                                await self._emit("transaction", tx)
-                        else:
-                            self.logger.error(
-                                "Skipping block %s due to fetch failure.",
-                                block_hash
-                            )
-
-                else:
-                    # If we only need the header, emit it directly
-                    await self._emit("block", result)
-
-            elif "topics" in result and "data" in result:
-                # This is a log
-                await self._emit("log", self._decode_log(result))
+        elif "topics" in result and "data" in result:
+            decoded_log = self._decode_log(result)
+            asyncio.create_task(self._dispatcher.emit("log", decoded_log))

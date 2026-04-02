@@ -21,6 +21,8 @@ class HttpListener:
         poll_interval: float = 2.0,
         chain_id: int | None = None,
         logger: logging.Logger | None = None,
+        BLOCK_COMPLETENESS_RETRIES: int = 5,
+        BLOCK_COMPLETENESS_INTERVAL: float = 0.3
     ) -> None:
         self.rpc_url = rpc_url
         self.block_detail = block_detail
@@ -29,6 +31,8 @@ class HttpListener:
         self.poll_interval = poll_interval
         self.chain_id = chain_id
         self.logger = logger or logging.getLogger("HttpListener")
+        self.BLOCK_COMPLETENESS_RETRIES = BLOCK_COMPLETENESS_RETRIES
+        self.BLOCK_COMPLETENESS_INTERVAL = BLOCK_COMPLETENESS_INTERVAL
 
         self._running = False
         self._w3: AsyncWeb3 | None = None
@@ -44,10 +48,12 @@ class HttpListener:
         self._abi_filter = ABIFilterRegistry()
 
         self._last_block_number: int | None = None
+        # Track last emitted block hash for reorg detection.
         self._last_block_hash: str | None = None
         self._filter_ids: list[str] = []
         self._use_filter_api = True
 
+    # Public API
     def on(
         self,
         event: str,
@@ -97,21 +103,21 @@ class HttpListener:
                 provider = AsyncHTTPProvider(self.rpc_url)
                 self._w3 = AsyncWeb3(provider)
 
-                # Inject POA middleware if the chain needs it
                 if needs_poa_middleware(self.chain_id):
                     self._w3.middleware_onion.inject(
                         ExtraDataToPOAMiddleware, layer=0
                     )
                     self.logger.debug(
-                        "Injected ExtraDataToPOAMiddleware "
-                        "for chain_id=%s",
-                        self.chain_id
+                        "Injected ExtraDataToPOAMiddleware for chain_id=%s",
+                        self.chain_id,
                     )
 
                 delay = self.reconnect_delay
 
                 block_num = await self._w3.eth.block_number
                 self._last_block_number = block_num
+                # Reset reorg tracker on reconnect to avoid false positives.
+                self._last_block_hash = None
                 self.logger.info(
                     "Connected to %s  latest_block=%s",
                     self.rpc_url,
@@ -127,7 +133,8 @@ class HttpListener:
 
             except Exception as exc:
                 self.logger.error("Listener error: %s", exc)
-                await self._emit("error", exc)
+                # Dispatch error callbacks
+                asyncio.create_task(self._emit("error", exc))
             finally:
                 if self._w3:
                     await self._w3.provider.disconnect()
@@ -135,7 +142,7 @@ class HttpListener:
                 self._filter_ids.clear()
 
             if self._running:
-                self.logger.info("Reconnecting in %.1fs...", delay)
+                self.logger.info("Reconnecting in %.1fs…", delay)
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, self.max_reconnect_delay)
 
@@ -143,37 +150,82 @@ class HttpListener:
         self._running = False
         self.logger.info("Listener stop requested.")
 
+    # Internal helpers
     def _decode_log(self, log: dict) -> dict:
         return self._abi_filter.decode_log(log)
 
     async def _emit(self, event: str, payload: Any) -> None:
+        """
+        Dispatch callbacks as independent tasks so a slow callback never
+        blocks the poll loop or delays subsequent block processing.
+        """
         for cb in self._listeners.get(event, []):
-            try:
-                await cb(payload)
-            except Exception as exc:
-                self.logger.exception(
-                    "Callback raised for event '%s': %s", event, exc
-                )
+            asyncio.create_task(self._safe_call(cb, event, payload))
+
+    async def _safe_call(
+        self, cb: Callable[..., Awaitable[None]], event: str, payload: Any
+    ) -> None:
+        try:
+            await cb(payload)
+        except Exception as exc:
+            self.logger.exception(
+                "Callback raised for event '%s': %s", event, exc
+            )
 
     async def _get_latest_block_number(self) -> int:
         if self._w3 is None:
             raise RuntimeError("No active Web3 connection")
         return await self._w3.eth.block_number
 
-    async def _get_block_by_number(self, block_number: int) -> dict:
+    async def _get_block_by_number(self, block_number: int) -> dict | None:
+        """
+        Fetch a block and wait until its transaction count stabilises across
+        two consecutive reads, ensuring we never process a partial block body.
+        """
         if self._w3 is None:
             raise RuntimeError("No active Web3 connection")
+
         full_tx = self.block_detail == BlockDetail.FULL_BLOCK
-        return await self._w3.eth.get_block(
-            block_number, full_transactions=full_tx
+        prev_tx_count: int | None = None
+        block = None
+
+        for attempt in range(self.BLOCK_COMPLETENESS_RETRIES):
+            try:
+                block = await self._w3.eth.get_block(
+                    block_number, full_transactions=full_tx
+                )
+            except Exception as exc:
+                self.logger.warning(
+                    "get_block(%s) attempt %d failed: %s",
+                    hex(block_number), attempt + 1, exc,
+                )
+                await asyncio.sleep(self.BLOCK_COMPLETENESS_INTERVAL)
+                continue
+
+            tx_count = len(block.get("transactions", []))
+
+            # Two consecutive reads agree — block is complete.
+            if tx_count == prev_tx_count:
+                return block
+
+            prev_tx_count = tx_count
+            if attempt < self.BLOCK_COMPLETENESS_RETRIES - 1:
+                await asyncio.sleep(self.BLOCK_COMPLETENESS_INTERVAL)
+
+        # Return best-effort result rather than silently dropping the block.
+        self.logger.warning(
+            "Block %s tx count never stabilised; emitting with %d txs",
+            hex(block_number),
+            len(block.get("transactions", [])) if block else 0,
         )
+        return block
 
     async def _poll_blocks(self) -> None:
         try:
             latest = await self._get_latest_block_number()
         except Exception as exc:
             self.logger.error("eth_blockNumber failed: %s", exc)
-            await self._emit("error", exc)
+            asyncio.create_task(self._emit("error", exc))
             return
 
         if self._last_block_number is None:
@@ -183,42 +235,54 @@ class HttpListener:
         for block_num in range(self._last_block_number + 1, latest + 1):
             try:
                 block = await self._get_block_by_number(block_num)
-                if block:
-                    # Reorg detection: compare parentHash to last known hash
-                    if self._last_block_hash is not None:
-                        parent_hash = block.get("parentHash")
-                        if isinstance(parent_hash, bytes):
-                            parent_hash = "0x" + parent_hash.hex()
-                        if parent_hash != self._last_block_hash:
-                            await self._emit("reorg", {
-                                "detected_at_block": block_num,
-                                "expected_parent": self._last_block_hash,
-                                "actual_parent": parent_hash,
-                            })
-                            self.logger.warning(
-                                "Reorg detected at block %s: "
-                                "expected_parent=%s actual_parent=%s",
-                                hex(block_num),
-                                self._last_block_hash,
-                                parent_hash,
-                            )
+                if not block:
+                    continue
 
-                    block_hash = block.get("hash")
-                    if isinstance(block_hash, bytes):
-                        block_hash = "0x" + block_hash.hex()
-                    self._last_block_hash = block_hash
+                # --- Reorg detection ---
+                parent_hash = block.get("parentHash")
+                if isinstance(parent_hash, bytes):
+                    parent_hash = "0x" + parent_hash.hex()
 
-                    await self._emit("block", block)
-                    self.logger.debug("Emitted block %s", hex(block_num))
-                    if self.block_detail == BlockDetail.FULL_BLOCK:
-                        for tx in block.get("transactions", []):
-                            await self._emit("transaction", tx)
+                if (
+                    self._last_block_hash is not None
+                    and parent_hash != self._last_block_hash
+                ):
+                    self.logger.warning(
+                        "Reorg detected at block %s: expected_parent=%s"
+                        "actual_parent=%s",
+                        hex(block_num),
+                        self._last_block_hash,
+                        parent_hash,
+                    )
+                    # Dispatch reorg as a task — never block the poll loop.
+                    asyncio.create_task(
+                        self._emit("reorg", {
+                            "detected_at_block": block_num,
+                            "expected_parent": self._last_block_hash,
+                            "actual_parent": parent_hash,
+                        })
+                    )
+
+                block_hash = block.get("hash")
+                if isinstance(block_hash, bytes):
+                    block_hash = "0x" + block_hash.hex()
+                self._last_block_hash = block_hash
+
+                # Dispatch block and transactions as tasks (non-blocking).
+                asyncio.create_task(self._emit("block", block))
+                self.logger.debug("Emitted block %s", hex(block_num))
+
+                if self.block_detail == BlockDetail.FULL_BLOCK:
+                    for tx in block.get("transactions", []):
+                        asyncio.create_task(self._emit("transaction", tx))
+
             except Exception as exc:
                 self.logger.warning(
                     "Could not fetch block %s: %s", hex(block_num), exc
                 )
-                await self._emit("error", exc)
-                # Do not update _last_block_hash on fetch failure
+                asyncio.create_task(self._emit("error", exc))
+                # Do not update _last_block_hash on fetch failure to preserve
+                # reorg detection integrity for the next successful fetch.
 
         self._last_block_number = latest
 
@@ -257,14 +321,13 @@ class HttpListener:
                 self._filter_ids.append(fid)
                 self.logger.info(
                     "Installed eth_newFilter -> filter_id=%s  params=%s",
-                    fid,
-                    params,
+                    fid, params,
                 )
 
         except Exception:
             self._use_filter_api = False
             self.logger.info(
-                "eth_newFilter not supported -- falling back to eth_getLogs"
+                "eth_newFilter not supported — falling back to eth_getLogs"
             )
 
     async def _poll_logs(self) -> None:
@@ -284,13 +347,15 @@ class HttpListener:
             try:
                 logs = await self._w3.eth.get_filter_changes(filter_id)
                 for log in logs or []:
-                    await self._emit("log", self._decode_log(log))
+                    # Dispatch each log
+                    asyncio.create_task(
+                        self._emit("log", self._decode_log(log))
+                    )
             except Exception as exc:
                 self.logger.warning(
                     "eth_getFilterChanges failed for filter %s: %s"
-                    " -- switching to eth_getLogs",
-                    filter_id,
-                    exc,
+                    " — switching to eth_getLogs",
+                    filter_id, exc,
                 )
                 self._use_filter_api = False
                 return
@@ -310,7 +375,9 @@ class HttpListener:
             try:
                 logs = await self._w3.eth.get_logs(params)
                 for log in logs or []:
-                    await self._emit("log", self._decode_log(log))
+                    asyncio.create_task(
+                        self._emit("log", self._decode_log(log))
+                    )
             except Exception as exc:
                 self.logger.error("eth_getLogs failed: %s", exc)
-                await self._emit("error", exc)
+                asyncio.create_task(self._emit("error", exc))
