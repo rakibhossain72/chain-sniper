@@ -5,6 +5,9 @@ Logging utilities for Chain Sniper.
 import logging
 from typing import Optional
 
+# disable logging from external libraries to reduce noise
+logging.getLogger("web3").setLevel(logging.WARNING)
+
 
 def setup_logging(
     level: str = "INFO",
@@ -28,7 +31,7 @@ def setup_logging(
     logging.basicConfig(
         level=numeric_level,
         format=format_str,
-        datefmt="%Y-%m-%d %H:%M:%S",
+        datefmt="%H:%M",
     )
 
     logger = logging.getLogger(logger_name or __name__)

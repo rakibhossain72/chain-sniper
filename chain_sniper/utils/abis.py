@@ -4,6 +4,7 @@ ABI utilities for loading and working with contract ABIs.
 
 import json
 from typing import List, Dict, Any
+from web3 import Web3
 
 
 def load_abi_from_file(filepath: str) -> List[Dict[str, Any]]:
@@ -51,6 +52,19 @@ def get_event_signature(abi: List[Dict[str, Any]], event_name: str) -> str:
             return f"{event_name}({','.join(input_types)})"
 
     raise ValueError(f"Event '{event_name}' not found in ABI")
+
+
+def get_event_topic(event_signature: str) -> str:
+    """
+    Compute the keccak256 topic hash for an event signature.
+
+    Args:
+        event_signature: Event signature string (e.g. "Transfer(address,address,uint256)")
+
+    Returns:
+        Topic hash as hex string with 0x prefix
+    """
+    return Web3.keccak(text=event_signature).hex()
 
 
 def get_function_signature(abi: List[Dict[str, Any]], function_name: str) -> str:

@@ -15,7 +15,13 @@ from chain_sniper.listener.websocket_listener import WebSocketListener
 from chain_sniper.listener.poll_listener import HttpListener
 from chain_sniper.listener.common import BlockDetail
 from chain_sniper.filters import Filter
-from chain_sniper.types import EventCallback, BlockCallback, ErrorCallback, TxCallback, ReorgCallback
+from chain_sniper.types import (
+    EventCallback,
+    BlockCallback,
+    ErrorCallback,
+    TxCallback,
+    ReorgCallback,
+)
 from chain_sniper.rpc_pool import RPCPool
 
 
