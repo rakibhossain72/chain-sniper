@@ -24,7 +24,7 @@ class WebSocketListener:
         max_reconnect_delay: float = 60.0,
         chain_id: int | None = None,
         logger: logging.Logger | None = None,
-        HEADER_QUEUE_MAX: int = 256
+        HEADER_QUEUE_MAX: int = 256,
     ) -> None:
         self.rpc_url = rpc_url
         self.block_detail = block_detail
@@ -37,9 +37,7 @@ class WebSocketListener:
         self._running = False
         self._w3: AsyncWeb3 | None = None
 
-        self._listeners: dict[
-            str, list[Callable[..., Awaitable[None]]]
-        ] = {
+        self._listeners: dict[str, list[Callable[..., Awaitable[None]]]] = {
             "block": [],
             "transaction": [],
             "log": [],
@@ -51,9 +49,7 @@ class WebSocketListener:
 
         self._subscription_ids: list[str] = []
 
-        self._header_queue: asyncio.Queue = asyncio.Queue(
-            maxsize=self.HEADER_QUEUE_MAX
-        )
+        self._header_queue: asyncio.Queue = asyncio.Queue(maxsize=self.HEADER_QUEUE_MAX)
         self._worker_task: asyncio.Task | None = None
 
         self._block_fetcher: BlockFetcher | None = None
@@ -106,9 +102,7 @@ class WebSocketListener:
                 provider = WebSocketProvider(self.rpc_url)
                 async with AsyncWeb3(provider) as w3:
                     if needs_poa_middleware(self.chain_id):
-                        w3.middleware_onion.inject(
-                            ExtraDataToPOAMiddleware, layer=0
-                        )
+                        w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
                         self.logger.debug(
                             "Injected ExtraDataToPOAMiddleware, chain_id=%s",
                             self.chain_id,
@@ -123,9 +117,7 @@ class WebSocketListener:
 
                     sub_id = await w3.eth.subscribe("newHeads")
                     self._subscription_ids.append(str(sub_id))
-                    self.logger.info(
-                        "Subscribed to newHeads (sub_id=%s)", sub_id
-                    )
+                    self.logger.info("Subscribed to newHeads (sub_id=%s)", sub_id)
 
                     for flt in self._log_filters:
                         filter_params: dict = {}
@@ -133,9 +125,7 @@ class WebSocketListener:
                             filter_params["address"] = flt["address"]
                         if flt["topics"]:
                             filter_params["topics"] = flt["topics"]
-                        log_sub_id = await w3.eth.subscribe(
-                            "logs", filter_params
-                        )
+                        log_sub_id = await w3.eth.subscribe("logs", filter_params)
                         self._subscription_ids.append(str(log_sub_id))
                         self.logger.info(
                             "Subscribed to logs (sub_id=%s) filter=%s",
@@ -143,9 +133,7 @@ class WebSocketListener:
                             filter_params,
                         )
 
-                    self._worker_task = asyncio.create_task(
-                        self._block_worker()
-                    )
+                    self._worker_task = asyncio.create_task(self._block_worker())
 
                     async for message in w3.socket.process_subscriptions():
                         if not self._running:
@@ -153,12 +141,8 @@ class WebSocketListener:
                         try:
                             await self._process_message(message)
                         except Exception as exc:
-                            self.logger.error(
-                                "Message processing error: %s", exc
-                            )
-                            asyncio.create_task(
-                                self._dispatcher.emit("error", exc)
-                            )
+                            self.logger.error("Message processing error: %s", exc)
+                            asyncio.create_task(self._dispatcher.emit("error", exc))
 
             except Exception as exc:
                 self.logger.error("Listener error: %s", exc)
@@ -207,26 +191,26 @@ class WebSocketListener:
     async def _block_worker(self) -> None:
         while self._running:
             try:
-                header = await asyncio.wait_for(
-                    self._header_queue.get(), timeout=1.0
-                )
+                header = await asyncio.wait_for(self._header_queue.get(), timeout=1.0)
             except asyncio.TimeoutError:
                 continue
             except asyncio.CancelledError:
                 break
+
+            block_num = header.get("number")
+            self.logger.debug(
+                "Dequeued block %s from header queue (queue size: %d)",
+                block_num,
+                self._header_queue.qsize(),
+            )
 
             try:
                 block_hash = header.get("hash")
                 if not block_hash:
                     continue
 
-                if (
-                    self.block_detail == BlockDetail.FULL_BLOCK
-                    and self._block_fetcher
-                ):
-                    block = await self._block_fetcher.fetch_complete(
-                        block_hash
-                    )
+                if self.block_detail == BlockDetail.FULL_BLOCK and self._block_fetcher:
+                    block = await self._block_fetcher.fetch_complete(block_hash)
                     if block:
                         await self._block_processor.process(
                             block, self._dispatcher.emit

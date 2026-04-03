@@ -71,6 +71,10 @@ class RuleMatcher:
         """Lowercase strings when case-insensitive mode is active."""
         if not self.case_sensitive and isinstance(value, str):
             return value.lower()
+        elif isinstance(value, list):
+            return [self._normalize(v) for v in value]
+        elif isinstance(value, bytes):
+            return value.hex()
         return value
 
     def _evaluate(self, tx_value: Any, condition: Any) -> bool:

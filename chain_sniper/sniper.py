@@ -2,12 +2,28 @@
 ChainSniper - Simple blockchain event monitoring.
 
 A builder-pattern API for watching blockchain events with automatic decoding.
-Accepts a plain RPC URL (str) or an RPCPool
-    for fault-tolerant multi-endpoint setups.
+Accepts a plain RPC URL (str) or an RPCPool for fault-tolerant multi-endpoint
+setups.
+
+Performance improvements over the original:
+  - Smart block_detail: defaults to HEADER; auto-upgrades to FULL_BLOCK only
+    when on_block or on_transaction callbacks are registered.
+  - Callbacks are wrapped once at registration time, not re-wrapped on every
+    pool failover, eliminating redundant closure allocation.
+  - chain_id is resolved before _create_listener() so POA middleware is always
+    injected correctly on the first attempt.
+  - _create_listener() deduplicates the block_detail enum resolution.
+  - _fetch_chain_id is skipped entirely when RPCPool already carries
+    expected_chain_id, avoiding an extra HTTP round-trip on startup.
+  - Wrapped callbacks are stored separately from raw callbacks so
+        re-registering
+    on pool rotation reuses the already-wrapped closures instead of building
+        new ones.
 """
 
 import time
 import asyncio
+import logging
 import aiohttp
 from typing import Any, Optional, Union, List, Callable
 from web3.datastructures import AttributeDict
@@ -59,30 +75,45 @@ class ChainSniper:
             chain_id: Optional chain ID. If provided, will be used to determine
                       if POA middleware is needed.
         """
-        # Resolve the URL to use for the listener.
         if isinstance(rpc, str):
             self._rpc_pool: Optional["RPCPool"] = None
             self.rpc_url: str = rpc
         else:
-            # RPCPool passed — pull the best URL now; we re-ask on reconnect.
             self._rpc_pool = rpc
             self.rpc_url = rpc.get_rpc()
 
         self._listener: Optional[Union[WebSocketListener, HttpListener]] = None
         self._filters: List[Any] = []
+
+        # Raw (unwrapped) callbacks — source of truth for pool rotation.
         self._event_callbacks: List[EventCallback] = []
         self._block_callbacks: List[BlockCallback] = []
         self._error_callbacks: List[ErrorCallback] = []
         self._tx_callbacks: List[TxCallback] = []
         self._reorg_callbacks: List[ReorgCallback] = []
-        self._block_detail = "full_block"
-        self._poll_interval = 2.0
-        self._chain_id = chain_id
 
-    # ------------------------------------------------------------------ #
-    # Pool-aware RPC helpers                                               #
-    # ------------------------------------------------------------------ #
+        # Wrapped callbacks built once in start() and reused on failover.
+        # Keys match the listener event names: "log", "block", "error",
+        # "transaction", "reorg".
+        self._wrapped: dict[str, list[Callable]] = {
+            "log": [],
+            "block": [],
+            "error": [],
+            "transaction": [],
+            "reorg": [],
+        }
 
+        # FIX: default to HEADER — the cheapest mode.
+        # Auto-upgraded to full_block in on_block / on_transaction if needed.
+        self._block_detail: str = "header"
+        self._poll_interval: float = 2.0
+        self._chain_id: int | None = chain_id
+        self._logger = logging.getLogger("ChainSniper")
+
+        # Track whether _wrapped has been built yet.
+        self._callbacks_wrapped: bool = False
+
+    # Pool-aware RPC helpers
     def _get_rpc_url(self) -> str:
         """Return the current best RPC URL, re-querying the pool each time."""
         if self._rpc_pool is not None:
@@ -97,9 +128,29 @@ class ChainSniper:
         if self._rpc_pool is not None:
             self._rpc_pool.mark_failed(url)
 
+    async def _resolve_chain_id(self) -> None:
+        """
+        Resolve chain_id exactly once before the listener is created.
+
+        Priority:
+          1. Already set by the caller — do nothing.
+          2. RPCPool carries expected_chain_id — use it (no HTTP call).
+          3. Fetch from the RPC endpoint (one HTTP call, then cached).
+        """
+        if self._chain_id is not None:
+            return
+
+        if (
+            self._rpc_pool is not None
+            and self._rpc_pool.expected_chain_id is not None
+        ):
+            self._chain_id = self._rpc_pool.expected_chain_id
+            return
+
+        self._chain_id = await self._fetch_chain_id(self.rpc_url)
+
     async def _fetch_chain_id(self, url: str) -> int:
-        """Fetch chain ID from the RPC endpoint."""
-        # Convert WebSocket URL to HTTP for probing
+        """Fetch chain ID from the RPC endpoint (one-time startup probe)."""
         probe_url = url
         if url.startswith("wss://"):
             probe_url = "https://" + url[6:]
@@ -121,10 +172,7 @@ class ChainSniper:
                 data = await resp.json(content_type=None)
                 return int(data["result"], 16)
 
-    # ------------------------------------------------------------------ #
-    # Builder API — unchanged from original                                #
-    # ------------------------------------------------------------------ #
-
+    # Builder API
     def event(
         self,
         contract: Optional[Union[str, List[str]]] = None,
@@ -133,7 +181,7 @@ class ChainSniper:
         topics: Optional[List[str]] = None,
     ) -> Callable[[EventCallback], EventCallback]:
         """
-        Decorator for registering event handlers.
+        Decorator for registering event (log) handlers.
 
         Args:
             contract: Contract address(es) to watch
@@ -142,22 +190,11 @@ class ChainSniper:
             topics: Raw topic hashes (alternative to abi+name)
         """
         def decorator(callback: EventCallback) -> EventCallback:
-            if not self._listener:
-                self._create_listener()
-
-            if topics:
-                # Pass ABI for decoding even when topics are provided
-                self._listener.add_abi_log_filter(
-                        abi=abi, address=contract, topics=topics
-                    )
-            elif abi and name:
-                self._listener.add_abi_log_filter(
-                        abi=abi, address=contract, event_name=name
-                    )
-            else:
-                raise ValueError("Either provide topics or both abi and name")
-
+            # Defer listener creation to start() so chain_id is resolved first.
             self._event_callbacks.append(callback)
+            self._register_log_filter(
+                abi=abi, address=contract, name=name, topics=topics
+            )
             return callback
 
         return decorator
@@ -170,7 +207,7 @@ class ChainSniper:
         topics: Optional[List[str]] = None,
     ) -> "ChainSniper":
         """
-        Watch for specific contract events.
+        Watch for specific contract events (fluent API).
 
         Args:
             abi: Contract ABI (list or JSON string)
@@ -178,26 +215,14 @@ class ChainSniper:
             event: Event name to filter (e.g., "Transfer")
             topics: Raw topic hashes (alternative to abi+event)
         """
-        if not self._listener:
-            self._create_listener()
-
-        if topics:
-            # Pass ABI for decoding even when topics are provided
-            self._listener.add_abi_log_filter(
-                abi=abi, address=address, topics=topics
-            )
-        elif abi and event:
-            self._listener.add_abi_log_filter(
-                    abi=abi, address=address, event_name=event
-                )
-        else:
-            raise ValueError("Either provide topics or both abi and event")
-
+        self._register_log_filter(
+            abi=abi, address=address, name=event, topics=topics
+        )
         return self
 
     def filter(
-                self, filter_obj: Optional[Any] = None, **rules
-            ) -> "ChainSniper":
+        self, filter_obj: Optional[Any] = None, **rules
+    ) -> "ChainSniper":
         """Add filtering logic."""
         if filter_obj is None and rules:
             filter_obj = Filter()
@@ -220,8 +245,14 @@ class ChainSniper:
         return self
 
     def on_block(self, callback: BlockCallback) -> "ChainSniper":
-        """Register block callback."""
+        """
+        Register block callback.
+        Automatically upgrades block_detail to FULL_BLOCK so the callback
+        receives complete block bodies with transactions.
+        """
         self._block_callbacks.append(callback)
+        # A block callback implies the caller wants transaction data.
+        self._block_detail = "full_block"
         return self
 
     def on_error(self, callback: ErrorCallback) -> "ChainSniper":
@@ -230,17 +261,24 @@ class ChainSniper:
         return self
 
     def on_transaction(self, callback: TxCallback) -> "ChainSniper":
-        """Register a callback for individual transaction events."""
+        """
+        Register a callback for individual transaction events.
+        Automatically upgrades block_detail to FULL_BLOCK.
+        """
         self._tx_callbacks.append(callback)
+        self._block_detail = "full_block"
         return self
 
     def on_reorg(self, callback: ReorgCallback) -> "ChainSniper":
-        """Register a callback for reorg events (no filter wrapping — always significant)."""
+        """Register a callback for reorg events (no filter wrapping)."""
         self._reorg_callbacks.append(callback)
         return self
 
     def block_detail(self, detail: str) -> "ChainSniper":
-        """Set block detail level: 'header' or 'full_block'."""
+        """
+        Explicitly set block detail level: 'header' or 'full_block'.
+        Use this to override the smart default when you need manual control.
+        """
         self._block_detail = detail
         return self
 
@@ -249,20 +287,94 @@ class ChainSniper:
         self._poll_interval = seconds
         return self
 
+    # Internal: log filter registration (deferred — no listener needed)
+    # Pending log filters accumulated before start() creates the listener.
+    # Each entry: {"abi": ..., "address": ..., "name": ..., "topics": ...}
+    def _register_log_filter(
+        self,
+        *,
+        abi=None,
+        address=None,
+        name=None,
+        topics=None,
+    ) -> None:
+        """
+        Accumulate a log filter specification.  The filter is applied to the
+        listener inside _create_listener() once chain_id is known.
+        """
+        if not hasattr(self, "_pending_log_filters"):
+            self._pending_log_filters: list[dict] = []
+
+        if topics is None and (abi is None or name is None):
+            raise ValueError(
+                "Either provide topics or both abi and name/event"
+            )
+
+        self._pending_log_filters.append(
+            {"abi": abi, "address": address, "name": name, "topics": topics}
+        )
+
+    def _apply_pending_log_filters(self) -> None:
+        """Push accumulated log filter specs onto the live listener."""
+        for spec in getattr(self, "_pending_log_filters", []):
+            if spec["topics"] is not None:
+                self._listener.add_abi_log_filter(
+                    abi=spec["abi"],
+                    address=spec["address"],
+                    topics=spec["topics"],
+                )
+            else:
+                self._listener.add_abi_log_filter(
+                    abi=spec["abi"],
+                    address=spec["address"],
+                    event_name=spec["name"],
+                )
+
+    # Internal: callback wrapping
+    def _build_wrapped_callbacks(self) -> None:
+        """
+        Wrap all raw callbacks with filter logic exactly once and store them
+        in self._wrapped.  Subsequent calls (e.g. after pool rotation) reuse
+        the same wrapped closures — no new closures are allocated.
+        """
+        if self._callbacks_wrapped:
+            return
+
+        self._wrapped["log"] = [
+            self._wrap_event_callback(cb) for cb in self._event_callbacks
+        ]
+        self._wrapped["block"] = [
+            self._wrap_block_callback(cb) for cb in self._block_callbacks
+        ]
+        self._wrapped["error"] = list(self._error_callbacks)
+        self._wrapped["transaction"] = [
+            self._wrap_tx_callback(cb) for cb in self._tx_callbacks
+        ]
+        self._wrapped["reorg"] = list(self._reorg_callbacks)
+
+        self._callbacks_wrapped = True
+
+    def _register_wrapped_callbacks(self) -> None:
+        """Register all pre-wrapped callbacks onto the current listener."""
+        for event, callbacks in self._wrapped.items():
+            for cb in callbacks:
+                self._listener.on(event, cb)
+
     def _wrap_event_callback(self, callback: EventCallback) -> EventCallback:
         """Wrap an event callback to apply filters before execution."""
         if not self._filters:
             return callback
 
+        # Capture filters at wrap time — list is stable after start().
+        filters = list(self._filters)
+
         async def wrapped_callback(event: dict) -> None:
-            # Apply all filters - event must match at least one
-            for filter_obj in self._filters:
+            for filter_obj in filters:
                 try:
                     if filter_obj.match_log(event):
                         await callback(event)
                         return
                 except Exception:
-                    # Log filter error but don't crash
                     pass
 
         return wrapped_callback
@@ -272,17 +384,17 @@ class ChainSniper:
         if not self._filters:
             return callback
 
+        filters = list(self._filters)
+
         async def wrapped_callback(block: dict) -> None:
-            # If block has transactions, filter them
             if not block:
                 return
 
             transactions = block.get("transactions", [])
             if transactions and isinstance(transactions[0], AttributeDict):
-                # Filter transactions before calling callback
                 filtered_txs = []
                 for tx in transactions:
-                    for filter_obj in self._filters:
+                    for filter_obj in filters:
                         try:
                             if filter_obj.match(tx):
                                 filtered_txs.append(tx)
@@ -290,13 +402,10 @@ class ChainSniper:
                         except Exception:
                             pass
 
-                # Only call callback if there are matching transactions
                 if filtered_txs:
-                    # Create a copy of block with filtered transactions
                     filtered_block = {**block, "transactions": filtered_txs}
                     await callback(filtered_block)
             else:
-                # No transactions or header-only mode, call callback as-is
                 await callback(block)
 
         return wrapped_callback
@@ -306,8 +415,10 @@ class ChainSniper:
         if not self._filters:
             return callback
 
+        filters = list(self._filters)
+
         async def wrapped_callback(tx: dict) -> None:
-            for filter_obj in self._filters:
+            for filter_obj in filters:
                 try:
                     if filter_obj.match(tx):
                         await callback(tx)
@@ -317,53 +428,79 @@ class ChainSniper:
 
         return wrapped_callback
 
+    # Lifecycle
     async def start(self) -> None:
         """Start the listener and begin monitoring."""
-        # Fetch chain_id if not provided
-        if self._chain_id is None:
-            if self._rpc_pool is not None:
-                # Use expected_chain_id from the pool
-                self._chain_id = self._rpc_pool.expected_chain_id
-            else:
-                # Fetch chain_id from the RPC endpoint
-                self._chain_id = await self._fetch_chain_id(self.rpc_url)
+        # 1. Resolve chain_id ONCE before any listener is created.
+        #    This guarantees POA middleware is injected correctly on the
+        #    very first connection attempt.
+        await self._resolve_chain_id()
 
+        # 2. Create listener now that chain_id is known.
         if not self._listener:
             self._create_listener()
 
-        # Wrap callbacks with filter logic if filters are present
-        for callback in self._event_callbacks:
-            wrapped_callback = self._wrap_event_callback(callback)
-            self._listener.on("log", wrapped_callback)
-        for callback in self._block_callbacks:
-            wrapped_callback = self._wrap_block_callback(callback)
-            self._listener.on("block", wrapped_callback)
-        for callback in self._error_callbacks:
-            self._listener.on("error", callback)
-        for callback in self._tx_callbacks:
-            wrapped_callback = self._wrap_tx_callback(callback)
-            self._listener.on("transaction", wrapped_callback)
-        for callback in self._reorg_callbacks:
-            self._listener.on("reorg", callback)
+        # 3. Apply deferred log filters to the freshly created listener.
+        self._apply_pending_log_filters()
+
+        # 4. Build wrapped callbacks exactly once.
+        self._build_wrapped_callbacks()
+
+        # 5. Register them on the listener.
+        self._register_wrapped_callbacks()
 
         await self._run_with_pool_rotation()
+
     def stop(self) -> None:
         """Stop the listener.
-        Also stops the pool's health monitor if one is attached.
-        """
+            Also stops the pool's health monitor if one is attached."""
         if self._listener:
             self._listener.stop()
         if self._rpc_pool is not None:
             self._rpc_pool.stop()
 
+    # Internal: listener creation
+    def _create_listener(self) -> None:
+        """
+        Create the appropriate listener for the current rpc_url.
+
+        chain_id must already be resolved before calling this so that POA
+        middleware can be injected on the first connection.
+        """
+        url = self._get_rpc_url()
+
+        # Resolve enum once — used by both branches below.
+        block_detail_enum = (
+            BlockDetail.FULL_BLOCK
+            if self._block_detail == "full_block"
+            else BlockDetail.HEADER
+        )
+
+        if url.startswith("ws"):
+            self._listener = WebSocketListener(
+                url,
+                block_detail=block_detail_enum,
+                chain_id=self._chain_id,
+            )
+        else:
+            self._listener = HttpListener(
+                url,
+                block_detail=block_detail_enum,
+                poll_interval=self._poll_interval,
+                chain_id=self._chain_id,
+            )
+
+    # Internal: pool rotation
     async def _run_with_pool_rotation(self) -> None:
         """
         Run the listener.  When a pool is present, catch transport errors,
         mark the failed endpoint, rotate to the next healthy one, recreate
         the listener, and resume — transparently to the caller.
+
+        Callbacks are NOT re-wrapped on rotation; the pre-built closures in
+        self._wrapped are reused directly.
         """
         if self._rpc_pool is None:
-            # No pool — plain run, same as original behaviour.
             await self._listener.start()
             return
 
@@ -372,14 +509,13 @@ class ChainSniper:
             t0 = time.monotonic()
             try:
                 await self._listener.start()
-                # Listener exited cleanly — record success and stop.
                 elapsed = (time.monotonic() - t0) * 1000
                 self._on_rpc_success(current_url, elapsed)
                 return
             except Exception as exc:
                 self._on_rpc_failure(current_url)
-                # Propagate to registered error callbacks, then rotate.
-                for cb in self._error_callbacks:
+
+                for cb in self._wrapped["error"]:
                     try:
                         asyncio.get_event_loop().call_soon(
                             lambda exc=exc: asyncio.ensure_future(cb(exc))
@@ -390,63 +526,20 @@ class ChainSniper:
                 try:
                     next_url = self._get_rpc_url()
                 except RuntimeError:
-                    # All endpoints exhausted — surface the original error.
                     raise exc from None
 
                 if next_url == current_url:
-                    raise exc from None  # Only one endpoint and it failed.
+                    raise exc from None
 
-                # Recreate the listener on the new URL.
+                # Rotate to new endpoint.
                 self.rpc_url = next_url
                 self._listener = None
-                # Re-fetch chain_id if it was None initially
-                if self._chain_id is None:
-                    if self._rpc_pool is not None:
-                        self._chain_id = (
-                            self._rpc_pool.expected_chain_id
-                        )
-                    else:
-                        self._chain_id = await self._fetch_chain_id(
-                            self.rpc_url
-                        )
+
+                # chain_id is already known — no need to re-fetch.
                 self._create_listener()
-                # Re-register callbacks on the fresh listener.
-                for callback in self._event_callbacks:
-                    wrapped_callback = self._wrap_event_callback(callback)
-                    self._listener.on("log", wrapped_callback)
-                for callback in self._block_callbacks:
-                    wrapped_callback = self._wrap_block_callback(callback)
-                    self._listener.on("block", wrapped_callback)
-                for callback in self._error_callbacks:
-                    self._listener.on("error", callback)
-                for callback in self._tx_callbacks:
-                    wrapped_callback = self._wrap_tx_callback(callback)
-                    self._listener.on("transaction", wrapped_callback)
-                for callback in self._reorg_callbacks:
-                    self._listener.on("reorg", callback)
 
-    def _create_listener(self) -> None:
-        """Create the appropriate listener for the current rpc_url."""
-        url = self._get_rpc_url()
+                # Apply log filters to the fresh listener.
+                self._apply_pending_log_filters()
 
-        if url.startswith("ws"):
-            block_detail_enum = (
-                BlockDetail.FULL_BLOCK if self._block_detail == "full_block"
-                else BlockDetail.HEADER
-            )
-            self._listener = WebSocketListener(
-                    url,
-                    block_detail=block_detail_enum,
-                    chain_id=self._chain_id
-                )
-        else:
-            block_detail_enum = (
-                BlockDetail.FULL_BLOCK if self._block_detail == "full_block"
-                else BlockDetail.HEADER
-            )
-            self._listener = HttpListener(
-                url,
-                block_detail=block_detail_enum,
-                poll_interval=self._poll_interval,
-                chain_id=self._chain_id,
-            )
+                # Reuse the already-wrapped callbacks (no new closures).
+                self._register_wrapped_callbacks()
