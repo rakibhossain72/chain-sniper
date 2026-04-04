@@ -133,3 +133,43 @@ class ABIFilterRegistry:
                 return self._log_decoder.decode_log(log, abi)
 
         return log
+
+    def decode_transaction(self, tx: Dict[str, Any]) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+        """
+        Decode a transaction using registered ABIs.
+
+        Args:
+            tx: Raw transaction dictionary
+
+        Returns:
+            Tuple of (function_name, arguments_dict) if matched, otherwise (None, None)
+        """
+        if not tx.get("input") or tx["input"] == "0x":
+            return None, None
+            
+        address = tx.get("to")
+        address_lower = address.lower() if address else None
+        
+        # Try address specific mapping first
+        abi = self._abi_map.get((address_lower, None))
+        
+        # Try fallback matching
+        abis_to_try = []
+        if abi:
+            abis_to_try.append(abi)
+        else:
+            # Try all unique ABIs registered
+            for stored_abi in self._abi_map.values():
+                if stored_abi not in abis_to_try:
+                    abis_to_try.append(stored_abi)
+                    
+        w3 = Web3()
+        for test_abi in abis_to_try:
+            try:
+                contract = w3.eth.contract(abi=test_abi)
+                func_obj, args = contract.decode_function_input(tx["input"])
+                return func_obj.fn_name, args
+            except Exception:
+                continue
+                
+        return None, None
