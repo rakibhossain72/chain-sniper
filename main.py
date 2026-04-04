@@ -1,80 +1,66 @@
+
+import json
 import asyncio
 from typing import Any
 
+from eth_utils import address
+
 from chain_sniper.utils.config import get_rpc_url
 from chain_sniper.utils.logging import setup_logging
-from chain_sniper.utils.runner import create_websocket_listener
+from chain_sniper import ChainSniper, TransactionFilter, LogFilter
 from chain_sniper.engine.pipeline import Pipeline
-from chain_sniper.filters import Filter
-from chain_sniper.listener.redis_rule_listener import RedisRuleListener
 from chain_sniper.abstracts.base_strategy import BaseStrategy
-
+from chain_sniper.utils.abis import get_event_topic
 
 # Load configuration and setup logging
-RPC_URL = get_rpc_url()
+RPC_URL = "https://bsc-dataseed.bnbchain.org" #get_rpc_url()
 logger = setup_logging(level="INFO", logger_name=__name__)
 
+# Transfer event topic (keccak256 of "Transfer(address,address,uint256)")
+TRANSFER_TOPIC = get_event_topic("Transfer(address,address,uint256)")
+print(f"Transfer event topic: {TRANSFER_TOPIC}")
 
 class Strategy(BaseStrategy):
-    async def execute(self, data: Any) -> None:
-        logger.info(f"Executing strategy for transaction: {data}")
-        # Add your custom logic here
-        # for example, save to database, send notification, etc.
+    async def execute(self, tx: Any) -> None:
+        value = tx.get("value", 0) / (10**18)
+        print(f"Transaction hash: {tx.get('hash').hex()} Value: {value:.4f} BNB")
 
     async def execute_log(self, log):
-        # Check if decoded
-        if "event" in log and log["event"] == "Transfer":
-            args = log.get("args", {})
-            amount = args.get("value", 0) / (10**18)
-            print(
-                f"Transfer: {args.get('from')} → {args.get('to')} Amount: {amount} USDT"
-            )
-        else:
-            # Raw log
-            amount = int(log.get("data", "0x")[-64:], 16) / (10**18)
-            print(
-                f"Transaction hash: {log.get('transactionHash')} Amount: {amount} USDT"
-            )
-        # Add your custom logic here
-        # for example, save to database, send notification, etc.
-
+        print(f"Log Address: {log}")
 
 async def main():
-    # 1. Initialize the dynamic filter
-    dyn_filter = Filter()
+    # 1. Initialize the split filters
+    tx_filter = TransactionFilter()
+    log_filter = LogFilter()
 
-    # 2. Add an initial rule (optional)
-    # dyn_filter.add_log_rule({"type": "log", "min_amount": 5000})
+    # 2. Add an initial rule
+    # log_filter.subscribe(address="0x55d398326f99059fF775485246999027B3197955", topics=[TRANSFER_TOPIC])
 
-    # 3. Initialize pipeline with dynamic filter
-    pipeline = Pipeline(filter=dyn_filter, strategy=Strategy())
+    # 3. Initialize pipeline with split filters
+    pipeline = Pipeline(tx_filter=tx_filter, log_filter=log_filter, strategy=Strategy())
 
-    # Create WebSocket listener using utility function
-    listener = create_websocket_listener(
-        rpc_url=RPC_URL,
-        block_detail="full_block",
-        logger=logger,
-    )
+    # Create ChainSniper listener
+    listener = ChainSniper(RPC_URL)
+    
+    # Register filters on the sniper
+    listener.filter(tx_filter=tx_filter, log_filter=log_filter)
 
-    # 4. Initialize Background Rule Listener (Redis)
-    rule_listener = RedisRuleListener(dynamic_filter=dyn_filter)
-
-    # Start the rule listener in the background
-    await rule_listener.start()
-
-    listener.on("block", pipeline.process_block)
-
-    # Example: Add ABI-based log filter (much easier than topic hashes!)
-    # import json
-    # with open("examples/abis/erc20.json", "r") as f:
-    #     erc20_abi = json.load(f)
-    # listener.add_abi_log_filter(abi=erc20_abi, address="0x55d398326f99059fF775485246999027B3197955", event_name="Transfer")
-    # listener.on("log", pipeline.process_log)
-
-    # listener.on("log", pipeline.process_log)
+    listener.on_event(pipeline.process_log)
+    
+    # counter = 0
+    # @listener.event(
+    #     contract="0x55d398326f99059fF775485246999027B3197955",
+    #     topics=[TRANSFER_TOPIC]
+    # )
+    # async def process_log(log):
+    #     nonlocal counter
+    #     counter += 1
+    #     event, from_address, to_address = log.topics
+    #     value_hex = log.data.hex()
+    #     print(f"Log {counter} From: 0x{from_address.hex()[24:]}, Value: {int(value_hex, 16) / (10**18):.4f} USD")
+        
 
     await listener.start()
-
 
 if __name__ == "__main__":
     asyncio.run(main())

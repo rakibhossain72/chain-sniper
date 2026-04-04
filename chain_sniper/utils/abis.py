@@ -64,7 +64,7 @@ def get_event_topic(event_signature: str) -> str:
     Returns:
         Topic hash as hex string with 0x prefix
     """
-    return Web3.keccak(text=event_signature).hex()
+    return "0x" + Web3.keccak(text=event_signature).hex()
 
 
 def get_function_signature(abi: List[Dict[str, Any]], function_name: str) -> str:

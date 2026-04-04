@@ -22,7 +22,9 @@ class HttpListener:
         chain_id: int | None = None,
         logger: logging.Logger | None = None,
         BLOCK_COMPLETENESS_RETRIES: int = 5,
-        BLOCK_COMPLETENESS_INTERVAL: float = 0.3
+        BLOCK_COMPLETENESS_INTERVAL: float = 0.3,
+        log_filter=None,
+        transaction_filter=None,
     ) -> None:
         self.rpc_url = rpc_url
         self.block_detail = block_detail
@@ -34,6 +36,10 @@ class HttpListener:
         self.BLOCK_COMPLETENESS_RETRIES = BLOCK_COMPLETENESS_RETRIES
         self.BLOCK_COMPLETENESS_INTERVAL = BLOCK_COMPLETENESS_INTERVAL
 
+        # New split filter references
+        self._log_filter = log_filter          # LogFilter instance (or None)
+        self._tx_filter = transaction_filter   # TransactionFilter (or None)
+
         self._running = False
         self._w3: AsyncWeb3 | None = None
 
@@ -44,14 +50,18 @@ class HttpListener:
             "reorg": [],
             "error": [],
         }
+
+        # Legacy manual log filters (kept for backward compat)
         self._log_filters: list[dict] = []
         self._abi_filter = ABIFilterRegistry()
 
         self._last_block_number: int | None = None
-        # Track last emitted block hash for reorg detection.
         self._last_block_hash: str | None = None
         self._filter_ids: list[str] = []
         self._use_filter_api = True
+
+        # LogFilter-managed filter specs: maps sub_id -> {filter_id, spec}
+        self._log_filter_map: dict[str, dict] = {}
 
     # Public API
     def on(
@@ -63,6 +73,8 @@ class HttpListener:
             self._listeners[event] = []
         self._listeners[event].append(callback)
         return callback
+
+    #  Legacy log filter API 
 
     def add_log_filter(
         self,
@@ -94,6 +106,84 @@ class HttpListener:
         )
         self.add_log_filter(address=address, topics=generated_topics)
 
+    #  LogFilter ↔ listener binding 
+
+    def _bind_log_filter(self) -> None:
+        """Bind the LogFilter so new subscriptions trigger eth_newFilter."""
+        if self._log_filter is None:
+            return
+        self._log_filter.bind_listener(
+            on_subscribe=self._on_log_subscribe,
+            on_unsubscribe=self._on_log_unsubscribe,
+        )
+
+    def _unbind_log_filter(self) -> None:
+        if self._log_filter is not None:
+            self._log_filter.unbind_listener()
+
+    async def _on_log_subscribe(self, spec: dict) -> None:
+        """Called by LogFilter when a new subscription is added at runtime."""
+        if self._w3 is None:
+            return
+        params: dict = {"fromBlock": "latest"}
+        if spec.get("address"):
+            params["address"] = spec["address"]
+        if spec.get("topics"):
+            params["topics"] = spec["topics"]
+
+        if self._use_filter_api:
+            try:
+                filter_id = await self._w3.eth.filter(params)
+                spec["filter_id"] = filter_id
+                self._log_filter_map[spec["id"]] = {
+                    "filter_id": filter_id,
+                    "spec": spec,
+                }
+                self._filter_ids.append(filter_id)
+                self.logger.info(
+                    "Installed eth_newFilter for sub_id=%s filter_id=%s params=%s",
+                    spec["id"], filter_id, params,
+                )
+            except Exception as exc:
+                self.logger.error(
+                    "eth_newFilter failed for sub_id=%s: %s — will use eth_getLogs",
+                    spec["id"], exc,
+                )
+                # Fallback: store spec for getLogs polling
+                self._log_filter_map[spec["id"]] = {
+                    "filter_id": None,
+                    "spec": spec,
+                }
+        else:
+            # Filter API not available — store spec for getLogs polling
+            self._log_filter_map[spec["id"]] = {
+                "filter_id": None,
+                "spec": spec,
+            }
+
+    async def _on_log_unsubscribe(self, spec: dict) -> None:
+        """Called by LogFilter when a subscription is removed at runtime."""
+        entry = self._log_filter_map.pop(spec["id"], None)
+        if entry and entry.get("filter_id") and self._w3:
+            try:
+                await self._w3.eth.uninstall_filter(entry["filter_id"])
+                self.logger.info(
+                    "Uninstalled filter for sub_id=%s", spec["id"],
+                )
+            except Exception as exc:
+                self.logger.error("Uninstall filter error: %s", exc)
+            if entry["filter_id"] in self._filter_ids:
+                self._filter_ids.remove(entry["filter_id"])
+
+    async def _setup_log_filter_specs(self) -> None:
+        """Install eth_newFilter for all existing LogFilter specs (on connect)."""
+        if self._log_filter is None:
+            return
+        for spec in self._log_filter.get_subscriptions():
+            await self._on_log_subscribe(spec)
+
+    #  Lifecycle 
+
     async def start(self) -> None:
         self._running = True
         delay = self.reconnect_delay
@@ -116,7 +206,6 @@ class HttpListener:
 
                 block_num = await self._w3.eth.block_number
                 self._last_block_number = block_num
-                # Reset reorg tracker on reconnect to avoid false positives.
                 self._last_block_hash = None
                 self.logger.info(
                     "Connected to %s  latest_block=%s",
@@ -124,7 +213,12 @@ class HttpListener:
                     hex(self._last_block_number),
                 )
 
+                # Setup legacy manual log filters
                 await self._setup_log_filters()
+
+                # Setup LogFilter-managed specs and bind for runtime adds
+                await self._setup_log_filter_specs()
+                self._bind_log_filter()
 
                 while self._running:
                     await self._poll_blocks()
@@ -133,13 +227,14 @@ class HttpListener:
 
             except Exception as exc:
                 self.logger.error("Listener error: %s", exc)
-                # Dispatch error callbacks
                 asyncio.create_task(self._emit("error", exc))
             finally:
+                self._unbind_log_filter()
                 if self._w3:
                     await self._w3.provider.disconnect()
                     self._w3 = None
                 self._filter_ids.clear()
+                self._log_filter_map.clear()
 
             if self._running:
                 self.logger.info("Reconnecting in %.1fs…", delay)
@@ -150,15 +245,17 @@ class HttpListener:
         self._running = False
         self.logger.info("Listener stop requested.")
 
-    # Internal helpers
+    #  Internal helpers 
+
     def _decode_log(self, log: dict) -> dict:
-        return self._abi_filter.decode_log(log)
+        decoded = self._abi_filter.decode_log(log)
+        if decoded is not log:
+            return decoded
+        if self._log_filter is not None:
+            return self._log_filter.decode_log(log)
+        return log
 
     async def _emit(self, event: str, payload: Any) -> None:
-        """
-        Dispatch callbacks as independent tasks so a slow callback never
-        blocks the poll loop or delays subsequent block processing.
-        """
         for cb in self._listeners.get(event, []):
             asyncio.create_task(self._safe_call(cb, event, payload))
 
@@ -178,10 +275,6 @@ class HttpListener:
         return await self._w3.eth.block_number
 
     async def _get_block_by_number(self, block_number: int) -> dict | None:
-        """
-        Fetch a block and wait until its transaction count stabilises across
-        two consecutive reads, ensuring we never process a partial block body.
-        """
         if self._w3 is None:
             raise RuntimeError("No active Web3 connection")
 
@@ -203,8 +296,6 @@ class HttpListener:
                 continue
 
             tx_count = len(block.get("transactions", []))
-
-            # Two consecutive reads agree — block is complete.
             if tx_count == prev_tx_count:
                 return block
 
@@ -212,7 +303,6 @@ class HttpListener:
             if attempt < self.BLOCK_COMPLETENESS_RETRIES - 1:
                 await asyncio.sleep(self.BLOCK_COMPLETENESS_INTERVAL)
 
-        # Return best-effort result rather than silently dropping the block.
         self.logger.warning(
             "Block %s tx count never stabilised; emitting with %d txs",
             hex(block_number),
@@ -238,7 +328,7 @@ class HttpListener:
                 if not block:
                     continue
 
-                # --- Reorg detection ---
+                # Reorg detection
                 parent_hash = block.get("parentHash")
                 if isinstance(parent_hash, bytes):
                     parent_hash = "0x" + parent_hash.hex()
@@ -248,13 +338,12 @@ class HttpListener:
                     and parent_hash != self._last_block_hash
                 ):
                     self.logger.warning(
-                        "Reorg detected at block %s: expected_parent=%s"
+                        "Reorg detected at block %s: expected_parent=%s "
                         "actual_parent=%s",
                         hex(block_num),
                         self._last_block_hash,
                         parent_hash,
                     )
-                    # Dispatch reorg as a task — never block the poll loop.
                     asyncio.create_task(
                         self._emit("reorg", {
                             "detected_at_block": block_num,
@@ -268,7 +357,6 @@ class HttpListener:
                     block_hash = "0x" + block_hash.hex()
                 self._last_block_hash = block_hash
 
-                # Dispatch block and transactions as tasks (non-blocking).
                 asyncio.create_task(self._emit("block", block))
                 self.logger.debug("Emitted block %s", hex(block_num))
 
@@ -281,10 +369,10 @@ class HttpListener:
                     "Could not fetch block %s: %s", hex(block_num), exc
                 )
                 asyncio.create_task(self._emit("error", exc))
-                # Do not update _last_block_hash on fetch failure to preserve
-                # reorg detection integrity for the next successful fetch.
 
         self._last_block_number = latest
+
+    #  Legacy log filter setup 
 
     async def _setup_log_filters(self) -> None:
         self._filter_ids.clear()
@@ -330,8 +418,12 @@ class HttpListener:
                 "eth_newFilter not supported — falling back to eth_getLogs"
             )
 
+    #  Log polling 
+
     async def _poll_logs(self) -> None:
-        if not self._log_filters:
+        has_legacy = bool(self._log_filters)
+        has_managed = bool(self._log_filter_map)
+        if not has_legacy and not has_managed and self._log_filter is None:
             return
 
         if self._use_filter_api:
@@ -340,22 +432,47 @@ class HttpListener:
             await self._poll_logs_via_getlogs()
 
     async def _poll_logs_via_filter(self) -> None:
+        """Poll using eth_getFilterChanges for both legacy and LogFilter specs."""
+        # Legacy filters
         for flt in self._log_filters:
-            filter_id = flt.get("filter_id").filter_id
+            filter_id = flt.get("filter_id")
             if not filter_id:
                 continue
+            fid = filter_id.filter_id if hasattr(filter_id, 'filter_id') else filter_id
             try:
-                logs = await self._w3.eth.get_filter_changes(filter_id)
+                logs = await self._w3.eth.get_filter_changes(fid)
                 for log in logs or []:
-                    # Dispatch each log
-                    asyncio.create_task(
-                        self._emit("log", self._decode_log(log))
-                    )
+                    decoded = self._decode_log(log)
+                    asyncio.create_task(self._emit("log", decoded))
             except Exception as exc:
                 self.logger.warning(
                     "eth_getFilterChanges failed for filter %s: %s"
                     " — switching to eth_getLogs",
-                    filter_id, exc,
+                    fid, exc,
+                )
+                self._use_filter_api = False
+                return
+
+        # LogFilter-managed filters
+        for sub_id, entry in list(self._log_filter_map.items()):
+            filter_id = entry.get("filter_id")
+            if not filter_id:
+                continue
+            fid = filter_id.filter_id if hasattr(filter_id, 'filter_id') else filter_id
+            try:
+                logs = await self._w3.eth.get_filter_changes(fid)
+                for log in logs or []:
+                    decoded = self._decode_log(log)
+                    # Apply post-filter rules if present
+                    if self._log_filter and self._log_filter.has_rules:
+                        if not self._log_filter.match(decoded):
+                            continue
+                    asyncio.create_task(self._emit("log", decoded))
+            except Exception as exc:
+                self.logger.warning(
+                    "eth_getFilterChanges failed for managed filter sub_id=%s: %s"
+                    " — switching to eth_getLogs",
+                    sub_id, exc,
                 )
                 self._use_filter_api = False
                 return
@@ -366,6 +483,7 @@ class HttpListener:
 
         from_block = self._last_block_number
 
+        # Legacy filters
         for flt in self._log_filters:
             params: dict = {"fromBlock": from_block, "toBlock": "latest"}
             if flt["address"]:
@@ -375,9 +493,31 @@ class HttpListener:
             try:
                 logs = await self._w3.eth.get_logs(params)
                 for log in logs or []:
-                    asyncio.create_task(
-                        self._emit("log", self._decode_log(log))
-                    )
+                    decoded = self._decode_log(log)
+                    asyncio.create_task(self._emit("log", decoded))
             except Exception as exc:
                 self.logger.error("eth_getLogs failed: %s", exc)
                 asyncio.create_task(self._emit("error", exc))
+
+        # LogFilter-managed specs (getLogs fallback)
+        if self._log_filter is not None:
+            for spec in self._log_filter.get_subscriptions():
+                params = {"fromBlock": from_block, "toBlock": "latest"}
+                if spec.get("address"):
+                    params["address"] = spec["address"]
+                if spec.get("topics"):
+                    params["topics"] = spec["topics"]
+                try:
+                    logs = await self._w3.eth.get_logs(params)
+                    for log in logs or []:
+                        decoded = self._decode_log(log)
+                        # Apply post-filter rules
+                        if self._log_filter.has_rules:
+                            if not self._log_filter.match(decoded):
+                                continue
+                        asyncio.create_task(self._emit("log", decoded))
+                except Exception as exc:
+                    self.logger.error(
+                        "eth_getLogs failed for sub_id=%s: %s", spec["id"], exc,
+                    )
+                    asyncio.create_task(self._emit("error", exc))

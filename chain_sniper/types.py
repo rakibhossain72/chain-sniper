@@ -3,7 +3,7 @@ Shared types, protocols, and type aliases for Chain Sniper.
 """
 
 from enum import Enum
-from typing import Callable, Awaitable, Any, Protocol, runtime_checkable
+from typing import Callable, Awaitable, Any, Dict, Protocol, runtime_checkable
 
 
 class BlockDetail(str, Enum):
@@ -23,8 +23,18 @@ FilterFn = Callable[[dict], bool]
 
 
 @runtime_checkable
-class FilterProtocol(Protocol):
-    """Protocol for filter objects."""
+class TransactionFilterProtocol(Protocol):
+    """Protocol for transaction filter objects."""
 
     def match(self, tx: dict) -> bool: ...
-    def match_log(self, log: dict) -> bool: ...
+    def add_rule(self, rule: dict) -> str: ...
+    def remove_rule(self, rule_id: str) -> bool: ...
+
+
+@runtime_checkable
+class LogFilterProtocol(Protocol):
+    """Protocol for log filter objects."""
+
+    def subscribe(self, **kwargs) -> str: ...
+    def unsubscribe(self, sub_id: str) -> bool: ...
+    def match(self, log: dict) -> bool: ...

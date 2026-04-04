@@ -25,6 +25,8 @@ class WebSocketListener:
         chain_id: int | None = None,
         logger: logging.Logger | None = None,
         HEADER_QUEUE_MAX: int = 256,
+        log_filter=None,
+        transaction_filter=None,
     ) -> None:
         self.rpc_url = rpc_url
         self.block_detail = block_detail
@@ -33,6 +35,10 @@ class WebSocketListener:
         self.chain_id = chain_id
         self.logger = logger or logging.getLogger("WebSocketListener")
         self.HEADER_QUEUE_MAX = HEADER_QUEUE_MAX
+
+        # New split filter references
+        self._log_filter = log_filter          # LogFilter instance (or None)
+        self._tx_filter = transaction_filter   # TransactionFilter (or None)
 
         self._running = False
         self._w3: AsyncWeb3 | None = None
@@ -44,10 +50,14 @@ class WebSocketListener:
             "reorg": [],
             "error": [],
         }
+
+        # Legacy manual log filters (kept for backward compat / direct API)
         self._log_filters: list[dict] = []
         self._abi_filter = ABIFilterRegistry()
 
         self._subscription_ids: list[str] = []
+        # Maps our LogFilter sub_id -> node subscription id (hex string)
+        self._log_sub_map: dict[str, str] = {}
 
         self._header_queue: asyncio.Queue = asyncio.Queue(maxsize=self.HEADER_QUEUE_MAX)
         self._worker_task: asyncio.Task | None = None
@@ -65,6 +75,8 @@ class WebSocketListener:
             self._listeners[event] = []
         self._listeners[event].append(callback)
         return callback
+
+    #  Legacy log filter API (kept for backward compat) 
 
     def add_log_filter(
         self,
@@ -91,6 +103,69 @@ class WebSocketListener:
             abi=abi, address=address, event_name=event_name
         )
         self.add_log_filter(address=address, topics=generated_topics)
+
+    #  LogFilter ↔ listener binding 
+
+    def _bind_log_filter(self) -> None:
+        """Bind the LogFilter so new subscriptions are pushed to the node."""
+        if self._log_filter is None:
+            return
+        self._log_filter.bind_listener(
+            on_subscribe=self._on_log_subscribe,
+            on_unsubscribe=self._on_log_unsubscribe,
+        )
+
+    def _unbind_log_filter(self) -> None:
+        if self._log_filter is not None:
+            self._log_filter.unbind_listener()
+
+    async def _on_log_subscribe(self, spec: dict) -> None:
+        """Called by LogFilter when a new subscription is added at runtime."""
+        if self._w3 is None:
+            return
+        filter_params: dict = {}
+        if spec.get("address"):
+            filter_params["address"] = spec["address"]
+        if spec.get("topics"):
+            filter_params["topics"] = spec["topics"]
+        try:
+            node_sub_id = await self._w3.eth.subscribe("logs", filter_params)
+            node_sub_str = str(node_sub_id)
+            spec["node_sub_id"] = node_sub_str
+            self._subscription_ids.append(node_sub_str)
+            self._log_sub_map[spec["id"]] = node_sub_str
+            self.logger.info(
+                "Live-subscribed to logs (node_sub=%s) for sub_id=%s filter=%s",
+                node_sub_str, spec["id"], filter_params,
+            )
+        except Exception as exc:
+            self.logger.error(
+                "Failed to subscribe logs for sub_id=%s: %s", spec["id"], exc,
+            )
+
+    async def _on_log_unsubscribe(self, spec: dict) -> None:
+        """Called by LogFilter when a subscription is removed at runtime."""
+        node_sub = self._log_sub_map.pop(spec["id"], None)
+        if node_sub and self._w3:
+            try:
+                await self._w3.eth.unsubscribe(node_sub)
+                self.logger.info(
+                    "Unsubscribed logs node_sub=%s for sub_id=%s",
+                    node_sub, spec["id"],
+                )
+            except Exception as exc:
+                self.logger.error("Unsubscribe error: %s", exc)
+            if node_sub in self._subscription_ids:
+                self._subscription_ids.remove(node_sub)
+
+    async def _subscribe_all_log_filter_specs(self) -> None:
+        """Subscribe all existing LogFilter specs on the node (reconnect)."""
+        if self._log_filter is None:
+            return
+        for spec in self._log_filter.get_subscriptions():
+            await self._on_log_subscribe(spec)
+
+    #  Lifecycle 
 
     async def start(self) -> None:
         self._running = True
@@ -119,6 +194,7 @@ class WebSocketListener:
                     self._subscription_ids.append(str(sub_id))
                     self.logger.info("Subscribed to newHeads (sub_id=%s)", sub_id)
 
+                    # Subscribe legacy manual log filters
                     for flt in self._log_filters:
                         filter_params: dict = {}
                         if flt["address"]:
@@ -132,6 +208,10 @@ class WebSocketListener:
                             log_sub_id,
                             filter_params,
                         )
+
+                    # Subscribe all LogFilter specs and bind for runtime adds
+                    await self._subscribe_all_log_filter_specs()
+                    self._bind_log_filter()
 
                     self._worker_task = asyncio.create_task(self._block_worker())
 
@@ -148,6 +228,7 @@ class WebSocketListener:
                 self.logger.error("Listener error: %s", exc)
                 asyncio.create_task(self._dispatcher.emit("error", exc))
             finally:
+                self._unbind_log_filter()
                 await self._cleanup()
 
             if self._running:
@@ -167,6 +248,7 @@ class WebSocketListener:
                 break
 
         self._subscription_ids.clear()
+        self._log_sub_map.clear()
         self._block_processor.reset()
 
     async def _cleanup(self) -> None:
@@ -179,9 +261,9 @@ class WebSocketListener:
         self._worker_task = None
 
         if self._w3 and self._subscription_ids:
-            for sub_id in self._subscription_ids:
+            for sid in self._subscription_ids:
                 try:
-                    await self._w3.eth.unsubscribe(sub_id)
+                    await self._w3.eth.unsubscribe(sid)
                 except Exception:
                     pass
 
@@ -230,7 +312,13 @@ class WebSocketListener:
                 self._header_queue.task_done()
 
     def _decode_log(self, log: dict) -> dict:
-        return self._abi_filter.decode_log(log)
+        """Decode log using ABI filter registry, then LogFilter if available."""
+        decoded = self._abi_filter.decode_log(log)
+        if decoded is not log:
+            return decoded
+        if self._log_filter is not None:
+            return self._log_filter.decode_log(log)
+        return log
 
     async def _emit(self, event: str, payload: Any) -> None:
         await self._dispatcher.emit(event, payload)
@@ -255,4 +343,10 @@ class WebSocketListener:
 
         elif "topics" in result and "data" in result:
             decoded_log = self._decode_log(result)
+
+            # Apply LogFilter post-filter rules if present
+            if self._log_filter is not None and self._log_filter.has_rules:
+                if not self._log_filter.match(decoded_log):
+                    return
+
             asyncio.create_task(self._dispatcher.emit("log", decoded_log))

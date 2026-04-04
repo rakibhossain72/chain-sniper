@@ -1,25 +1,43 @@
+"""
+Async Redis pub/sub listener for dynamic rule management.
+
+Subscribes to a Redis channel and pushes received rules into
+TransactionFilter / LogFilter instances in real-time.
+"""
+
 import asyncio
 import json
 import logging
 from typing import Optional
+
 import redis.asyncio as redis
-from chain_sniper.filters import Filter
+from chain_sniper.filters import TransactionFilter, LogFilter
 
 logger = logging.getLogger(__name__)
 
 
 class RedisRuleListener:
     """
-    An asynchronous background listener that subscribes to a Redis channel
-    and pushes received rules into the provided Filter instance.
+    Listens to a Redis pub/sub channel and applies incoming rules to
+    the provided ``TransactionFilter`` and ``LogFilter`` instances.
+
+    Supported message actions:
+      - ``add``    with type ``tx`` / ``log`` / ``log_subscription``
+      - ``remove`` with type ``tx`` / ``log`` / ``log_subscription``
+      - ``clear``  with rule_type ``tx`` / ``log`` / ``log_subscription``
+      - ``unsubscribe``  with ``sub_id``
     """
+
     def __init__(
         self,
-        dynamic_filter: Filter,
+        *,
+        tx_filter: Optional[TransactionFilter] = None,
+        log_filter: Optional[LogFilter] = None,
         redis_url: str = "redis://localhost",
-        channel: str = "sniper_rules"
+        channel: str = "sniper_rules",
     ):
-        self.dynamic_filter = dynamic_filter
+        self._tx_filter = tx_filter
+        self._log_filter = log_filter
         self.redis_url = redis_url
         self.channel = channel
         self.redis_client: Optional[redis.Redis] = None
@@ -32,26 +50,24 @@ class RedisRuleListener:
             self.pubsub = self.redis_client.pubsub()
             await self.pubsub.subscribe(self.channel)
             logger.info(
-                f"Connected to Redis. Listening for new rules"
-                f" on channel '{self.channel}'..."
+                "Connected to Redis. Listening for rules on channel '%s'...",
+                self.channel,
             )
-            
             self._task = asyncio.create_task(self._listen())
         except Exception as e:
-            logger.error(f"Failed to connect to Redis for rule listener: {e}")
+            logger.error("Failed to connect to Redis for rule listener: %s", e)
 
     async def _listen(self):
         try:
             if not self.pubsub:
                 return
-                
             async for message in self.pubsub.listen():
                 if message["type"] == "message":
                     self._process_message(message["data"])
         except asyncio.CancelledError:
             logger.info("Redis listener task cancelled.")
         except Exception as e:
-            logger.error(f"Error in Redis listener loop: {e}")
+            logger.error("Error in Redis listener loop: %s", e)
 
     def _process_message(self, data: bytes):
         try:
@@ -60,75 +76,128 @@ class RedisRuleListener:
 
             if action == "add":
                 rule_type = rule_data.get("type")
-                if rule_type == "log":
-                    rule_data.pop("type", None)
-                    rule_data.pop("action", None)
-                    rule_id = self.dynamic_filter.add_log_rule(rule_data)
-                    logger.info(
-                        f"Added dynamic log rule from Redis:"
-                        f" rule_id={rule_id} rule={rule_data}"
-                    )
-                elif rule_type == "tx":
-                    rule_data.pop("type", None)
-                    rule_data.pop("action", None)
-                    rule_id = self.dynamic_filter.add_tx_rule(rule_data)
-                    logger.info(
-                        f"Added dynamic tx rule from Redis:"
-                        f" rule_id={rule_id} rule={rule_data}"
-                    )
+                if rule_type == "tx":
+                    self._handle_add_tx(rule_data)
+                elif rule_type == "log":
+                    self._handle_add_log(rule_data)
+                elif rule_type == "log_subscription":
+                    self._handle_add_log_subscription(rule_data)
                 else:
-                    logger.warning(f"Unknown rule type received: {rule_type}")
+                    logger.warning("Unknown rule type: %s", rule_type)
 
             elif action == "remove":
                 rule_id = rule_data.get("rule_id")
                 if not rule_id:
-                    logger.warning(
-                        "Redis remove message missing 'rule_id' field"
-                    )
+                    logger.warning("Remove message missing 'rule_id'")
                     return
-                removed = self.dynamic_filter.remove_rule(rule_id)
-                if not removed:
-                    logger.warning(
-                        f"Redis remove: rule_id={rule_id} not found in filter"
-                    )
+                self._handle_remove(rule_id, rule_data.get("type"))
 
             elif action == "clear":
-                rule_type = rule_data.get("rule_type")
-                if rule_type == "tx":
-                    self.dynamic_filter.clear_tx_rules()
-                    logger.info("Cleared all TX rules via Redis message")
-                elif rule_type == "log":
-                    self.dynamic_filter.clear_log_rules()
-                    logger.info("Cleared all log rules via Redis message")
-                else:
-                    logger.warning(
-                        f"Redis clear message has unknown rule_type: {rule_type}"
-                    )
+                self._handle_clear(rule_data.get("rule_type"))
+
+            elif action == "unsubscribe":
+                sub_id = rule_data.get("sub_id")
+                if sub_id and self._log_filter:
+                    self._log_filter.unsubscribe(sub_id)
+                    logger.info("Unsubscribed log sub_id=%s via Redis", sub_id)
 
             else:
-                logger.warning(
-                    f"Redis rule message has unknown action: {action!r}"
-                )
+                logger.warning("Unknown action: %r", action)
 
         except json.JSONDecodeError:
-            logger.error(f"Failed to decode rule message from Redis: {data}")
+            logger.error("Failed to decode Redis message: %s", data)
         except Exception as e:
-            logger.error(f"Error processing Redis rule message: {e}")
+            logger.error("Error processing Redis message: %s", e)
+
+    #  Add handlers 
+
+    def _handle_add_tx(self, rule_data: dict):
+        if self._tx_filter is None:
+            logger.warning("No TransactionFilter — ignoring TX rule")
+            return
+        rule_data.pop("type", None)
+        rule_data.pop("action", None)
+        rule_id = self._tx_filter.add_rule(rule_data)
+        logger.info("Added TX rule from Redis: id=%s rule=%s", rule_id, rule_data)
+
+    def _handle_add_log(self, rule_data: dict):
+        """Add a log post-filter rule."""
+        if self._log_filter is None:
+            logger.warning("No LogFilter — ignoring log rule")
+            return
+        rule_data.pop("type", None)
+        rule_data.pop("action", None)
+        rule_id = self._log_filter.add_rule(rule_data)
+        logger.info("Added log rule from Redis: id=%s rule=%s", rule_id, rule_data)
+
+    def _handle_add_log_subscription(self, rule_data: dict):
+        """Add a log subscription on the node."""
+        if self._log_filter is None:
+            logger.warning("No LogFilter — ignoring log subscription")
+            return
+        rule_data.pop("type", None)
+        rule_data.pop("action", None)
+        sub_id = self._log_filter.subscribe(
+            address=rule_data.get("address"),
+            topics=rule_data.get("topics"),
+            abi=rule_data.get("abi"),
+            event_name=rule_data.get("event_name"),
+        )
+        logger.info("Added log subscription from Redis: sub_id=%s", sub_id)
+
+    #  Remove / clear handlers 
+
+    def _handle_remove(self, rule_id: str, rule_type: str | None = None):
+        removed = False
+        if rule_type == "tx" and self._tx_filter:
+            removed = self._tx_filter.remove_rule(rule_id)
+        elif rule_type == "log" and self._log_filter:
+            removed = self._log_filter.remove_rule(rule_id)
+        elif rule_type == "log_subscription" and self._log_filter:
+            removed = self._log_filter.unsubscribe(rule_id)
+        else:
+            if self._tx_filter and self._tx_filter.remove_rule(rule_id):
+                removed = True
+            elif self._log_filter and self._log_filter.remove_rule(rule_id):
+                removed = True
+        if not removed:
+            logger.warning("Remove: rule_id=%s not found", rule_id)
+
+    def _handle_clear(self, rule_type: str | None):
+        if rule_type == "tx" and self._tx_filter:
+            self._tx_filter.clear_rules()
+            logger.info("Cleared all TX rules via Redis")
+        elif rule_type == "log" and self._log_filter:
+            self._log_filter.clear_rules()
+            logger.info("Cleared all log rules via Redis")
+        elif rule_type == "log_subscription" and self._log_filter:
+            self._log_filter.clear_subscriptions()
+            logger.info("Cleared all log subscriptions via Redis")
+        elif rule_type is None:
+            if self._tx_filter:
+                self._tx_filter.clear_rules()
+            if self._log_filter:
+                self._log_filter.clear_rules()
+                self._log_filter.clear_subscriptions()
+            logger.info("Cleared all rules and subscriptions via Redis")
+        else:
+            logger.warning("Unknown rule_type for clear: %s", rule_type)
+
+    #  Shutdown 
 
     async def stop(self):
-        """Cleanly shutdown the redis rule listener task and connection."""
         if self._task:
             self._task.cancel()
             try:
                 await self._task
             except asyncio.CancelledError:
                 pass
-        
+
         if self.pubsub:
             await self.pubsub.unsubscribe(self.channel)
             await self.pubsub.close()
-            
+
         if self.redis_client:
             await self.redis_client.aclose()
-            
+
         logger.info("Redis rule listener stopped.")
