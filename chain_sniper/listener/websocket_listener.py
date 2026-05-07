@@ -25,6 +25,11 @@ class WebSocketListener:
         chain_id: int | None = None,
         logger: logging.Logger | None = None,
         HEADER_QUEUE_MAX: int = 256,
+        # Completeness-check tuning — passed through to BlockFetcher so callers
+        # can tighten intervals on fast chains (e.g. BSC 3s blocks) or loosen
+        # them on congested nodes without subclassing.
+        block_completeness_retries: int = 5,
+        block_completeness_interval: float = 0.4,
         log_filter=None,
         transaction_filter=None,
     ) -> None:
@@ -35,6 +40,8 @@ class WebSocketListener:
         self.chain_id = chain_id
         self.logger = logger or logging.getLogger("WebSocketListener")
         self.HEADER_QUEUE_MAX = HEADER_QUEUE_MAX
+        self._block_completeness_retries = block_completeness_retries
+        self._block_completeness_interval = block_completeness_interval
 
         # New split filter references
         self._log_filter = log_filter          # LogFilter instance (or None)
@@ -188,7 +195,14 @@ class WebSocketListener:
 
                     self._reset_state()
 
-                    self._block_fetcher = BlockFetcher(w3, self.logger)
+                    # Pass completeness-check tuning so the fetcher respects
+                    # the caller's latency budget for this specific node/chain.
+                    self._block_fetcher = BlockFetcher(
+                        w3,
+                        self.logger,
+                        retries=self._block_completeness_retries,
+                        interval=self._block_completeness_interval,
+                    )
 
                     sub_id = await w3.eth.subscribe("newHeads")
                     self._subscription_ids.append(str(sub_id))
@@ -291,7 +305,15 @@ class WebSocketListener:
                 if not block_hash:
                     continue
 
+                # Normalise HexBytes → hex string before any RPC call or
+                # comparison.  newHeads delivers HexBytes on some providers.
+                if isinstance(block_hash, (bytes, bytearray)):
+                    block_hash = "0x" + block_hash.hex()
+
                 if self.block_detail == BlockDetail.FULL_BLOCK and self._block_fetcher:
+                    # fetch_complete handles completeness verification and
+                    # returns a stable block; BlockProcessor handles reorg
+                    # detection and non-blocking event dispatch.
                     block = await self._block_fetcher.fetch_complete(block_hash)
                     if block:
                         await self._block_processor.process(
@@ -303,7 +325,12 @@ class WebSocketListener:
                             block_hash,
                         )
                 else:
-                    asyncio.create_task(self._dispatcher.emit("block", header))
+                    # HEADER mode: we only have the header dict from newHeads.
+                    # Run reorg detection directly against the header fields so
+                    # callers still receive "reorg" events even without full txs.
+                    await self._block_processor.process(
+                        header, self._dispatcher.emit
+                    )
 
             except Exception as exc:
                 self.logger.error("Block worker error: %s", exc)

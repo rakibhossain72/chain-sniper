@@ -109,3 +109,4 @@ poetry.lock
 
 # pipenv
 Pipfile.lock
+dump.rdb

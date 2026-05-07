@@ -247,6 +247,14 @@ class HttpListener:
 
     #  Internal helpers 
 
+    def _normalise_hash(self, value: Any) -> str | None:
+        """Normalise HexBytes or plain str to a lowercase 0x-prefixed hex string."""
+        if value is None:
+            return None
+        if isinstance(value, (bytes, bytearray)):
+            return "0x" + value.hex()
+        return str(value)
+
     def _decode_log(self, log: dict) -> dict:
         decoded = self._abi_filter.decode_log(log)
         if decoded is not log:
@@ -296,7 +304,12 @@ class HttpListener:
                 continue
 
             tx_count = len(block.get("transactions", []))
-            if tx_count == prev_tx_count:
+
+            # Only declare stable once we have two consecutive reads that agree.
+            # The original code compared against None on the first pass, which
+            # meant a block with 0 txs would be returned immediately without a
+            # second verification read.
+            if prev_tx_count is not None and tx_count == prev_tx_count:
                 return block
 
             prev_tx_count = tx_count
@@ -329,9 +342,7 @@ class HttpListener:
                     continue
 
                 # Reorg detection
-                parent_hash = block.get("parentHash")
-                if isinstance(parent_hash, bytes):
-                    parent_hash = "0x" + parent_hash.hex()
+                parent_hash = self._normalise_hash(block.get("parentHash"))
 
                 if (
                     self._last_block_hash is not None
@@ -352,9 +363,7 @@ class HttpListener:
                         })
                     )
 
-                block_hash = block.get("hash")
-                if isinstance(block_hash, bytes):
-                    block_hash = "0x" + block_hash.hex()
+                block_hash = self._normalise_hash(block.get("hash"))
                 self._last_block_hash = block_hash
 
                 asyncio.create_task(self._emit("block", block))
