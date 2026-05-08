@@ -1,6 +1,3 @@
-from .rpc_pool import RPCPool
+from .rpc_pool import RPCPool, HttpRPCPool, WssRPCPool
 
-
-__all__ = [
-    "RPCPool"
-]
+__all__ = ["RPCPool", "HttpRPCPool", "WssRPCPool"]

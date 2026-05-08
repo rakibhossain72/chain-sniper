@@ -1,5 +1,5 @@
 """
-Fault-tolerant monitoring using an RPCPool with multiple WebSocket endpoints.
+Fault-tolerant monitoring using WssRPCPool with multiple WebSocket endpoints.
 
 If one endpoint fails, the pool automatically rotates to the next healthy one.
 
@@ -10,7 +10,7 @@ Set at least one of the RPC URLs below, or use RPC_URL from your .env.
 
 import asyncio
 from chain_sniper import ChainSniper
-from chain_sniper.rpc_pool import RPCPool
+from chain_sniper.rpc_pool import WssRPCPool
 from chain_sniper.utils.logging import setup_logging
 
 ERC20_ABI = [
@@ -38,7 +38,7 @@ RPC_ENDPOINTS = [
 async def main():
     logger = setup_logging(level="INFO", logger_name="rpc-pool")
 
-    pool = await RPCPool.create(
+    pool = await WssRPCPool.create(
         rpcs=RPC_ENDPOINTS,
         expected_chain_id=56,  # BSC
     )
