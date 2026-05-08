@@ -4,10 +4,8 @@ Log subscription manager with optional post-filtering.
 Unlike transactions (where we receive all and filter locally), logs are
 pre-filtered at the node level — you tell the node *exactly* which logs
 you want by specifying address + topics.  This module manages those
-subscription specs and integrates with listeners:
-
-  • **WebSocket**  → ``eth_subscribe("logs", params)``
-  • **HTTP/HTTPS** → ``eth_newFilter`` / ``eth_getLogs`` polling
+subscription specs and integrates with the WebSocket listener via
+``eth_subscribe("logs", params)``.
 
 When a subscription is added at runtime and a listener is bound, the
 listener is notified so it can open a live subscription on the node.
@@ -113,7 +111,7 @@ class LogFilter:
           - ``abi`` + ``address`` + ``event_name``
 
         When a listener is bound, this triggers a live subscription on
-        the node (``eth_subscribe`` for WS, ``eth_newFilter`` for HTTP).
+        the node (``eth_subscribe`` for WS).
 
         Returns:
             sub_id - unique ID for this subscription.

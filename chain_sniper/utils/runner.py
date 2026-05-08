@@ -5,12 +5,11 @@ Runner utilities for starting listeners with proper error handling.
 import asyncio
 from typing import Any, Optional
 from chain_sniper.listener.websocket_listener import WebSocketListener
-from chain_sniper.listener.poll_listener import HttpListener
 from chain_sniper.listener.common import BlockDetail
 
 
 async def run_listener(
-    listener: WebSocketListener | HttpListener,
+    listener: WebSocketListener,
     startup_message: str = "Starting listener...",
     shutdown_message: str = "Listener stopped.",
 ) -> None:
@@ -58,37 +57,4 @@ def create_websocket_listener(
 
     return WebSocketListener(
         rpc_url=rpc_url, block_detail=block_detail_enum, logger=logger, **kwargs
-    )
-
-
-def create_http_listener(
-    rpc_url: str,
-    block_detail: str = "full_block",
-    logger: Optional[Any] = None,
-    poll_interval: float = 2.0,
-    **kwargs,
-) -> HttpListener:
-    """
-    Create an HTTP polling listener with common settings.
-
-    Args:
-        rpc_url: HTTP RPC URL
-        block_detail: Block detail level ("header" or "full_block")
-        logger: Logger instance
-        poll_interval: Polling interval in seconds
-        **kwargs: Additional arguments for HttpListener
-
-    Returns:
-        Configured HttpListener instance
-    """
-    block_detail_enum = (
-        BlockDetail.FULL_BLOCK if block_detail == "full_block" else BlockDetail.HEADER
-    )
-
-    return HttpListener(
-        rpc_url=rpc_url,
-        block_detail=block_detail_enum,
-        logger=logger,
-        poll_interval=poll_interval,
-        **kwargs,
     )

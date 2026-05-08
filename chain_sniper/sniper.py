@@ -2,14 +2,13 @@
 ChainSniper - Simple blockchain event monitoring.
 
 A builder-pattern API for watching blockchain events with automatic decoding.
-Accepts a plain RPC URL (str) or an RPCPool for fault-tolerant multi-endpoint
-setups.
+Accepts a plain WebSocket RPC URL (wss:// or ws://) or an RPCPool for
+fault-tolerant multi-endpoint setups.
 
 Architecture:
   - TransactionFilter  — local rule matching for txs / blocks.
   - LogFilter          — node-level log subscriptions + optional post-filter.
-  - Listeners receive the split filter instances directly and handle the
-    transport-specific details (eth_subscribe for WS, eth_newFilter for HTTP).
+  - WebSocketListener handles transport via eth_subscribe.
 """
 
 import time
@@ -19,7 +18,6 @@ import aiohttp
 from typing import Any, Optional, Union, List, Callable
 from web3.datastructures import AttributeDict
 from chain_sniper.listener.websocket_listener import WebSocketListener
-from chain_sniper.listener.poll_listener import HttpListener
 from chain_sniper.listener.common import BlockDetail
 from chain_sniper.filters import TransactionFilter, LogFilter
 from chain_sniper.types import (
@@ -36,14 +34,14 @@ class ChainSniper:
     """
     Builder for creating blockchain event listeners.
 
-    Accepts either a plain RPC URL or an RPCPool:
+    Accepts either a plain WebSocket RPC URL or an RPCPool:
 
         # Simple — single endpoint
         sniper = ChainSniper("wss://rpc.example.com")
 
-        # Robust — multi-endpoint pool (HTTP or WSS, mixed is fine)
+        # Robust — multi-endpoint pool
         pool = await RPCPool.create(
-            rpcs=["https://rpc1.example.com", "wss://rpc2.example.com"],
+            rpcs=["wss://rpc1.example.com", "wss://rpc2.example.com"],
             expected_chain_id=56,
         )
         sniper = ChainSniper(pool)
@@ -63,7 +61,7 @@ class ChainSniper:
             self._rpc_pool = rpc
             self.rpc_url = rpc.get_rpc()
 
-        self._listener: Optional[Union[WebSocketListener, HttpListener]] = None
+        self._listener: Optional[WebSocketListener] = None
 
         # Split filters — the only filtering mechanism.
         self._tx_filter: TransactionFilter = TransactionFilter()
@@ -234,7 +232,7 @@ class ChainSniper:
         return self
 
     def poll_interval(self, seconds: float) -> "ChainSniper":
-        """Set polling interval for HTTP listener."""
+        """Set polling interval (unused, kept for API compatibility)."""
         self._poll_interval = seconds
         return self
 
@@ -373,23 +371,13 @@ class ChainSniper:
             else BlockDetail.HEADER
         )
 
-        if url.startswith("ws"):
-            self._listener = WebSocketListener(
-                url,
-                block_detail=block_detail_enum,
-                chain_id=self._chain_id,
-                log_filter=self._log_filter,
-                transaction_filter=self._tx_filter,
-            )
-        else:
-            self._listener = HttpListener(
-                url,
-                block_detail=block_detail_enum,
-                poll_interval=self._poll_interval,
-                chain_id=self._chain_id,
-                log_filter=self._log_filter,
-                transaction_filter=self._tx_filter,
-            )
+        self._listener = WebSocketListener(
+            url,
+            block_detail=block_detail_enum,
+            chain_id=self._chain_id,
+            log_filter=self._log_filter,
+            transaction_filter=self._tx_filter,
+        )
 
     #  Internal: pool rotation 
 

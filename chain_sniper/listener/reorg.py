@@ -1,10 +1,10 @@
 """
 Chain reorganisation detection utilities.
 
-Both WebSocketListener and HttpListener delegate reorg detection to
-BlockProcessor, but this module provides a standalone ReorgTracker for
-callers that want to track reorg depth or build rollback logic on top of
-the "reorg" events emitted by the listeners.
+WebSocketListener delegates reorg detection to BlockProcessor, but this
+module provides a standalone ReorgTracker for callers that want to track
+reorg depth or build rollback logic on top of the "reorg" events emitted
+by the listener.
 """
 
 from __future__ import annotations

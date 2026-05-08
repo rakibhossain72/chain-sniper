@@ -33,7 +33,7 @@ async def handle_transfer(event):
 await sniper.start()
 ```
 
-Pass an HTTP URL instead of WebSocket to use polling mode automatically.
+Use a WebSocket URL (`wss://` or `ws://`) — that's the only supported transport.
 
 ## RPC Pool (fault-tolerant)
 
